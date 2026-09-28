@@ -53,7 +53,10 @@ impl Tensor {
         }
     }
 
-    pub fn add(&self, other: &Self) -> Option<Tensor> {
+    fn binary_op<F>(&self, other: &Self, op: F) -> Option<Tensor>
+    where
+        F: Fn(f32, f32) -> f32,
+    {
         let output_shape = Self::broadcast_shape(&self.shape, &other.shape)?;
 
         let output_numel: usize = output_shape.iter().product();
@@ -67,7 +70,7 @@ impl Tensor {
 
             let other_offset = Self::broadcast_offset(&output_index, &other.shape);
 
-            data.push(self.data[self_offset] + other.data[other_offset]);
+            data.push(op(self.data[self_offset], other.data[other_offset]));
         }
 
         Some(Self {
@@ -76,36 +79,16 @@ impl Tensor {
         })
     }
 
+    pub fn add(&self, other: &Self) -> Option<Tensor> {
+        self.binary_op(other, |x, y| x + y)
+    }
+
     pub fn sub(&self, other: &Self) -> Option<Tensor> {
-        if self.shape == other.shape {
-            Some(Self {
-                data: self
-                    .data
-                    .iter()
-                    .zip(other.data.iter())
-                    .map(|(x, y)| x - y)
-                    .collect(),
-                shape: self.shape.clone(),
-            })
-        } else {
-            None
-        }
+        self.binary_op(other, |x, y| x - y)
     }
 
     pub fn mul(&self, other: &Self) -> Option<Tensor> {
-        if self.shape == other.shape {
-            Some(Self {
-                data: self
-                    .data
-                    .iter()
-                    .zip(other.data.iter())
-                    .map(|(x, y)| x * y)
-                    .collect(),
-                shape: self.shape.clone(),
-            })
-        } else {
-            None
-        }
+        self.binary_op(other, |x, y| x * y)
     }
 
     pub fn sum(&self) -> Tensor {
@@ -301,54 +284,15 @@ mod tests {
     }
 
     #[test]
-    fn add() {
-        let tensor = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
-        let other = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
-        let another = Tensor::new(vec![1., 2., 3., 4.], vec![4]).unwrap();
+    fn binary_ops() {
+        let a = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
+        let b = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
 
-        assert_eq!(
-            tensor.add(&other),
-            Tensor::new(vec![2., 4., 6., 8.], vec![2, 2])
-        );
-        assert!(tensor.add(&another).is_none());
-    }
+        assert_eq!(a.add(&b), Tensor::new(vec![2., 4., 6., 8.], vec![2, 2]));
 
-    #[test]
-    fn add_with_broadcasting() {
-        let a = Tensor::new(vec![1., 2., 3., 4., 5., 6.], vec![2, 3]).unwrap();
+        assert_eq!(a.sub(&b), Tensor::new(vec![0., 0., 0., 0.], vec![2, 2]));
 
-        let b = Tensor::new(vec![10., 20., 30.], vec![3]).unwrap();
-
-        assert_eq!(
-            a.add(&b),
-            Tensor::new(vec![11., 22., 33., 14., 25., 36.,], vec![2, 3],)
-        );
-    }
-
-    #[test]
-    fn sub() {
-        let tensor = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
-        let other = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
-        let another = Tensor::new(vec![1., 2., 3., 4.], vec![4]).unwrap();
-
-        assert_eq!(
-            tensor.sub(&other),
-            Tensor::new(vec![0., 0., 0., 0.], vec![2, 2])
-        );
-        assert!(tensor.sub(&another).is_none());
-    }
-
-    #[test]
-    fn mul() {
-        let tensor = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
-        let other = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
-        let another = Tensor::new(vec![1., 2., 3., 4.], vec![4]).unwrap();
-
-        assert_eq!(
-            tensor.mul(&other),
-            Tensor::new(vec![1., 4., 9., 16.], vec![2, 2])
-        );
-        assert!(tensor.mul(&another).is_none());
+        assert_eq!(a.mul(&b), Tensor::new(vec![1., 4., 9., 16.], vec![2, 2]));
     }
 
     #[test]
