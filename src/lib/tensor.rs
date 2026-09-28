@@ -68,6 +68,59 @@ impl Tensor {
             None
         }
     }
+
+    pub fn sub(&self, other: &Self) -> Option<Tensor> {
+        if self.shape == other.shape {
+            Some(Self {
+                data: self
+                    .data
+                    .iter()
+                    .zip(other.data.iter())
+                    .map(|(x, y)| x - y)
+                    .collect(),
+                shape: self.shape.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn mul(&self, other: &Self) -> Option<Tensor> {
+        if self.shape == other.shape {
+            Some(Self {
+                data: self
+                    .data
+                    .iter()
+                    .zip(other.data.iter())
+                    .map(|(x, y)| x * y)
+                    .collect(),
+                shape: self.shape.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn sum(&self) -> Tensor {
+        Self {
+            data: vec![self.data.iter().sum::<f32>()],
+            shape: vec![1],
+        }
+    }
+
+    pub fn mean(&self) -> Tensor {
+        Self {
+            data: vec![self.data.iter().sum::<f32>() / self.numel() as f32],
+            shape: vec![1],
+        }
+    }
+
+    pub fn relu(&self) -> Tensor {
+        Self {
+            data: self.data.iter().map(|x| x.max(0.)).collect(),
+            shape: self.shape.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -202,5 +255,55 @@ mod tests {
             Tensor::new(vec![2., 4., 6., 8.], vec![2, 2])
         );
         assert!(tensor.add(&another).is_none());
+    }
+
+    #[test]
+    fn sub() {
+        let tensor = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
+        let other = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
+        let another = Tensor::new(vec![1., 2., 3., 4.], vec![4]).unwrap();
+
+        assert_eq!(
+            tensor.sub(&other),
+            Tensor::new(vec![0., 0., 0., 0.], vec![2, 2])
+        );
+        assert!(tensor.sub(&another).is_none());
+    }
+
+    #[test]
+    fn mul() {
+        let tensor = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
+        let other = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
+        let another = Tensor::new(vec![1., 2., 3., 4.], vec![4]).unwrap();
+
+        assert_eq!(
+            tensor.mul(&other),
+            Tensor::new(vec![1., 4., 9., 16.], vec![2, 2])
+        );
+        assert!(tensor.mul(&another).is_none());
+    }
+
+    #[test]
+    fn sum() {
+        let tensor = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
+
+        assert_eq!(tensor.sum(), Tensor::new(vec![10f32], vec![1]).unwrap())
+    }
+
+    #[test]
+    fn mean() {
+        let tensor = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
+
+        assert_eq!(tensor.mean(), Tensor::new(vec![2.5], vec![1]).unwrap())
+    }
+
+    #[test]
+    fn relu() {
+        let tensor = Tensor::new(vec![-1., -2., 1., 2.], vec![2, 2]).unwrap();
+
+        assert_eq!(
+            tensor.relu(),
+            Tensor::new(vec![0., 0., 1., 2.], vec![2, 2]).unwrap()
+        )
     }
 }
