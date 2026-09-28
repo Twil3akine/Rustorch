@@ -1,3 +1,5 @@
+use std::result;
+
 #[derive(Debug, PartialEq)]
 pub struct Tensor {
     data: Vec<f32>,
@@ -89,6 +91,35 @@ impl Tensor {
 
     pub fn mul(&self, other: &Self) -> Option<Tensor> {
         self.binary_op(other, |x, y| x * y)
+    }
+
+    pub fn matmul(&self, other: &Self) -> Option<Tensor> {
+        if !(self.ndim() == 2 && other.ndim() == 2 && self.shape[1] == other.shape[0]) {
+            return None;
+        }
+
+        let n = self.shape[0];
+        let k = self.shape[1];
+        let m = other.shape[1];
+
+        let mut result = Vec::with_capacity(n * m);
+
+        for i in 0..n {
+            for j in 0..m {
+                let mut sum: f32 = 0.;
+
+                for t in 0..k {
+                    sum += self.data[k * i + t] * other.data[m * t + j];
+                }
+
+                result.push(sum);
+            }
+        }
+
+        Some(Self {
+            data: result,
+            shape: vec![n, m],
+        })
     }
 
     pub fn sum(&self) -> Tensor {
