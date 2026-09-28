@@ -1,3 +1,4 @@
+#[derive(Debug, PartialEq)]
 pub struct Tensor {
     data: Vec<f32>,
     shape: Vec<usize>,
@@ -47,6 +48,22 @@ impl Tensor {
         if self.numel() == new_shape_element_number {
             self.shape = shape;
             Some(self)
+        } else {
+            None
+        }
+    }
+
+    pub fn add(&self, other: &Self) -> Option<Tensor> {
+        if self.shape == other.shape {
+            Some(Self {
+                data: self
+                    .data
+                    .iter()
+                    .zip(other.data.iter())
+                    .map(|(x, y)| x + y)
+                    .collect(),
+                shape: self.shape.clone(),
+            })
         } else {
             None
         }
@@ -172,5 +189,18 @@ mod tests {
         let reshaped = tensor.reshape(vec![5, 5]);
 
         assert!(reshaped.is_none());
+    }
+
+    #[test]
+    fn add() {
+        let tensor = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
+        let other = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
+        let another = Tensor::new(vec![1., 2., 3., 4.], vec![4]).unwrap();
+
+        assert_eq!(
+            tensor.add(&other),
+            Tensor::new(vec![2., 4., 6., 8.], vec![2, 2])
+        );
+        assert!(tensor.add(&another).is_none());
     }
 }
