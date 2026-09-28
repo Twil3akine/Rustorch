@@ -1,0 +1,176 @@
+pub struct Tensor {
+    data: Vec<f32>,
+    shape: Vec<usize>,
+}
+
+impl Tensor {
+    pub fn new(data: Vec<f32>, shape: Vec<usize>) -> Option<Self> {
+        if data.len() == shape.iter().product() {
+            Some(Self { data, shape })
+        } else {
+            None
+        }
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn ndim(&self) -> usize {
+        self.shape.len()
+    }
+
+    pub fn numel(&self) -> usize {
+        self.shape.iter().product()
+    }
+
+    pub fn get(&self, index: &[usize]) -> Option<f32> {
+        if index.len() != self.ndim() {
+            return None;
+        }
+
+        if self.shape.iter().zip(index).all(|(si, idx)| idx < si) {
+            let mut offset: usize = 0;
+            for i in 0..self.ndim() {
+                offset = offset * self.shape[i] + index[i];
+            }
+
+            Some(self.data[offset])
+        } else {
+            None
+        }
+    }
+
+    pub fn reshape(mut self, shape: Vec<usize>) -> Option<Self> {
+        let new_shape_element_number: usize = shape.iter().product();
+
+        if self.numel() == new_shape_element_number {
+            self.shape = shape;
+            Some(self)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_tensor() {
+        let tensor = Tensor::new(vec![1., 2., 3., 4., 5., 6.], vec![2, 3]);
+
+        assert!(tensor.is_some());
+    }
+
+    #[test]
+    fn reject_invalid_shape() {
+        let tensor = Tensor::new(vec![1., 2., 3.], vec![2, 2]);
+
+        assert!(tensor.is_none());
+    }
+
+    #[test]
+    fn tensor_properties() {
+        let tensor = Tensor::new(
+            vec![
+                1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16., 17., 18.,
+                19., 20., 21., 22., 23., 24.,
+            ],
+            vec![2, 3, 4],
+        )
+        .unwrap();
+
+        assert_eq!(tensor.ndim(), 3);
+        assert_eq!(tensor.numel(), 24);
+    }
+
+    #[test]
+    fn get_valid_index() {
+        let tensor = Tensor::new(
+            vec![
+                1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16., 17., 18.,
+                19., 20., 21., 22., 23., 24.,
+            ],
+            vec![2, 3, 4],
+        )
+        .unwrap();
+
+        assert_eq!(tensor.get(&[0, 0, 0]), Some(1.));
+        assert_eq!(tensor.get(&[1, 2, 3]), Some(24.));
+    }
+
+    #[test]
+    fn get_invalid_index() {
+        let tensor = Tensor::new(
+            vec![
+                1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16., 17., 18.,
+                19., 20., 21., 22., 23., 24.,
+            ],
+            vec![2, 3, 4],
+        )
+        .unwrap();
+
+        assert!(tensor.get(&[0, 0, 4]).is_none());
+        assert!(tensor.get(&[2, 0, 0]).is_none());
+        assert!(tensor.get(&[0, 3, 0]).is_none());
+    }
+
+    #[test]
+    fn get_wrong_dimension() {
+        let tensor = Tensor::new(
+            vec![
+                1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16., 17., 18.,
+                19., 20., 21., 22., 23., 24.,
+            ],
+            vec![2, 3, 4],
+        )
+        .unwrap();
+
+        assert!(tensor.get(&[0, 0]).is_none());
+        assert!(tensor.get(&[0, 0, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn reshape_success() {
+        let tensor = Tensor::new(
+            vec![
+                1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16., 17., 18.,
+                19., 20., 21., 22., 23., 24.,
+            ],
+            vec![2, 3, 4],
+        )
+        .unwrap();
+
+        let reshaped = tensor.reshape(vec![4, 3, 2]);
+
+        assert!(reshaped.is_some());
+
+        let reshaped = reshaped.unwrap();
+
+        assert_eq!(reshaped.shape(), &[4, 3, 2]);
+        assert_eq!(reshaped.ndim(), 3);
+        assert_eq!(reshaped.numel(), 24);
+
+        assert_eq!(reshaped.get(&[0, 0, 0]), Some(1.));
+        assert_eq!(reshaped.get(&[0, 0, 1]), Some(2.));
+        assert_eq!(reshaped.get(&[0, 1, 0]), Some(3.));
+    }
+
+    #[test]
+    fn reshape_fail() {
+        let tensor = Tensor::new(
+            vec![
+                1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16., 17., 18.,
+                19., 20., 21., 22., 23., 24.,
+            ],
+            vec![2, 3, 4],
+        )
+        .unwrap();
+
+        let reshaped = tensor.reshape(vec![5, 5]);
+
+        assert!(reshaped.is_none());
+    }
+}
