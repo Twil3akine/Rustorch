@@ -123,6 +123,26 @@ impl Tensor {
     }
 }
 
+fn broadcast_shape(x: &[usize], y: &[usize]) -> Option<Vec<usize>> {
+    let ndim = x.len().max(y.len());
+    let mut result = Vec::new();
+
+    for i in 0..ndim {
+        let xi = if x.len() <= i { 1 } else { x[x.len() - i - 1] };
+        let yi = if y.len() <= i { 1 } else { y[y.len() - i - 1] };
+
+        if xi == 1 || yi == 1 || xi == yi {
+            result.push(xi.max(yi));
+        } else {
+            return None;
+        }
+    }
+
+    result.reverse();
+
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +325,14 @@ mod tests {
             tensor.relu(),
             Tensor::new(vec![0., 0., 1., 2.], vec![2, 2]).unwrap()
         )
+    }
+
+    #[test]
+    fn broadcast_shape_test() {
+        assert_eq!(broadcast_shape(&[2, 3], &[2, 3]), Some(vec![2, 3]));
+        assert_eq!(broadcast_shape(&[2, 3], &[3]), Some(vec![2, 3]));
+        assert_eq!(broadcast_shape(&[2, 3], &[1, 3]), Some(vec![2, 3]));
+        assert_eq!(broadcast_shape(&[2, 1, 4], &[3, 4]), Some(vec![2, 3, 4]));
+        assert_eq!(broadcast_shape(&[2, 3], &[4, 3]), None);
     }
 }
