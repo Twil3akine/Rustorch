@@ -54,19 +54,26 @@ impl Tensor {
     }
 
     pub fn add(&self, other: &Self) -> Option<Tensor> {
-        if self.shape == other.shape {
-            Some(Self {
-                data: self
-                    .data
-                    .iter()
-                    .zip(other.data.iter())
-                    .map(|(x, y)| x + y)
-                    .collect(),
-                shape: self.shape.clone(),
-            })
-        } else {
-            None
+        let output_shape = Self::broadcast_shape(&self.shape, &other.shape)?;
+
+        let output_numel: usize = output_shape.iter().product();
+
+        let mut data = Vec::with_capacity(output_numel);
+
+        for output_offset in 0..output_numel {
+            let output_index = Self::unravel_index(output_offset, &output_shape);
+
+            let self_offset = Self::broadcast_offset(&output_index, &self.shape);
+
+            let other_offset = Self::broadcast_offset(&output_index, &other.shape);
+
+            data.push(self.data[self_offset] + other.data[other_offset]);
         }
+
+        Some(Self {
+            data,
+            shape: output_shape,
+        })
     }
 
     pub fn sub(&self, other: &Self) -> Option<Tensor> {
@@ -121,26 +128,55 @@ impl Tensor {
             shape: self.shape.clone(),
         }
     }
-}
 
-fn broadcast_shape(x: &[usize], y: &[usize]) -> Option<Vec<usize>> {
-    let ndim = x.len().max(y.len());
-    let mut result = Vec::new();
+    fn unravel_index(mut offset: usize, shape: &[usize]) -> Vec<usize> {
+        let mut index = vec![0; shape.len()];
 
-    for i in 0..ndim {
-        let xi = if x.len() <= i { 1 } else { x[x.len() - i - 1] };
-        let yi = if y.len() <= i { 1 } else { y[y.len() - i - 1] };
-
-        if xi == 1 || yi == 1 || xi == yi {
-            result.push(xi.max(yi));
-        } else {
-            return None;
+        for i in (0..shape.len()).rev() {
+            index[i] = offset % shape[i];
+            offset /= shape[i];
         }
+
+        index
     }
 
-    result.reverse();
+    fn broadcast_shape(x: &[usize], y: &[usize]) -> Option<Vec<usize>> {
+        let ndim = x.len().max(y.len());
+        let mut result = Vec::new();
 
-    Some(result)
+        for i in 0..ndim {
+            let xi = if x.len() <= i { 1 } else { x[x.len() - i - 1] };
+            let yi = if y.len() <= i { 1 } else { y[y.len() - i - 1] };
+
+            if xi == 1 || yi == 1 || xi == yi {
+                result.push(xi.max(yi));
+            } else {
+                return None;
+            }
+        }
+
+        result.reverse();
+
+        Some(result)
+    }
+
+    fn broadcast_offset(output_index: &[usize], input_shape: &[usize]) -> usize {
+        let shift = output_index.len() - input_shape.len();
+
+        let mut offset = 0;
+
+        for i in 0..input_shape.len() {
+            let dim = input_shape[i];
+
+            let output_i = output_index[shift + i];
+
+            let input_i = if dim == 1 { 0 } else { output_i };
+
+            offset = offset * dim + input_i;
+        }
+
+        offset
+    }
 }
 
 #[cfg(test)]
@@ -278,6 +314,18 @@ mod tests {
     }
 
     #[test]
+    fn add_with_broadcasting() {
+        let a = Tensor::new(vec![1., 2., 3., 4., 5., 6.], vec![2, 3]).unwrap();
+
+        let b = Tensor::new(vec![10., 20., 30.], vec![3]).unwrap();
+
+        assert_eq!(
+            a.add(&b),
+            Tensor::new(vec![11., 22., 33., 14., 25., 36.,], vec![2, 3],)
+        );
+    }
+
+    #[test]
     fn sub() {
         let tensor = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
         let other = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
@@ -329,10 +377,13 @@ mod tests {
 
     #[test]
     fn broadcast_shape_test() {
-        assert_eq!(broadcast_shape(&[2, 3], &[2, 3]), Some(vec![2, 3]));
-        assert_eq!(broadcast_shape(&[2, 3], &[3]), Some(vec![2, 3]));
-        assert_eq!(broadcast_shape(&[2, 3], &[1, 3]), Some(vec![2, 3]));
-        assert_eq!(broadcast_shape(&[2, 1, 4], &[3, 4]), Some(vec![2, 3, 4]));
-        assert_eq!(broadcast_shape(&[2, 3], &[4, 3]), None);
+        assert_eq!(Tensor::broadcast_shape(&[2, 3], &[2, 3]), Some(vec![2, 3]));
+        assert_eq!(Tensor::broadcast_shape(&[2, 3], &[3]), Some(vec![2, 3]));
+        assert_eq!(Tensor::broadcast_shape(&[2, 3], &[1, 3]), Some(vec![2, 3]));
+        assert_eq!(
+            Tensor::broadcast_shape(&[2, 1, 4], &[3, 4]),
+            Some(vec![2, 3, 4])
+        );
+        assert_eq!(Tensor::broadcast_shape(&[2, 3], &[4, 3]), None);
     }
 }
