@@ -1,146 +1,249 @@
-use std::result;
+use std::cell::RefCell;
+use std::rc::Rc;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone)]
 pub struct Tensor {
+    inner: Rc<RefCell<TensorInner>>,
+}
+
+impl std::fmt::Debug for Tensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.borrow();
+
+        f.debug_struct("Tensor")
+            .field("data", &inner.data)
+            .field("shape", &inner.shape)
+            .finish()
+    }
+}
+
+impl PartialEq for Tensor {
+    fn eq(&self, other: &Self) -> bool {
+        let self_inner = self.inner.borrow();
+        let other_inner = other.inner.borrow();
+
+        self_inner.data == other_inner.data && self_inner.shape == other_inner.shape
+    }
+}
+
+struct TensorInner {
     data: Vec<f32>,
     shape: Vec<usize>,
+    grad: Option<Vec<f32>>,
+    operation: Option<Operation>,
+    parents: Vec<Tensor>,
+}
+
+#[derive(Clone, Debug)]
+enum Operation {
+    Add,
+    Sub,
+    Mul,
+    MatMul,
+    Sum,
+    Mean,
+    ReLU,
 }
 
 impl Tensor {
     pub fn new(data: Vec<f32>, shape: Vec<usize>) -> Option<Self> {
-        if data.len() == shape.iter().product() {
-            Some(Self { data, shape })
-        } else {
-            None
-        }
-    }
-
-    pub fn shape(&self) -> &[usize] {
-        &self.shape
-    }
-
-    pub fn ndim(&self) -> usize {
-        self.shape.len()
-    }
-
-    pub fn numel(&self) -> usize {
-        self.shape.iter().product()
-    }
-
-    pub fn get(&self, index: &[usize]) -> Option<f32> {
-        if index.len() != self.ndim() {
+        if data.len() != shape.iter().product() {
             return None;
         }
 
-        if self.shape.iter().zip(index).all(|(si, idx)| idx < si) {
-            let mut offset: usize = 0;
-            for i in 0..self.ndim() {
-                offset = offset * self.shape[i] + index[i];
-            }
+        let inner = TensorInner {
+            data,
+            shape,
+            grad: None,
+            operation: None,
+            parents: Vec::new(),
+        };
 
-            Some(self.data[offset])
-        } else {
-            None
-        }
+        Some(Self {
+            inner: Rc::new(RefCell::new(inner)),
+        })
     }
 
-    pub fn reshape(mut self, shape: Vec<usize>) -> Option<Self> {
+    pub fn shape(&self) -> Vec<usize> {
+        self.inner.borrow().shape.clone()
+    }
+
+    pub fn ndim(&self) -> usize {
+        self.inner.borrow().shape.len()
+    }
+
+    pub fn numel(&self) -> usize {
+        self.inner.borrow().shape.iter().product()
+    }
+
+    pub fn get(&self, index: &[usize]) -> Option<f32> {
+        let inner = self.inner.borrow();
+
+        if index.len() != inner.shape.len() {
+            return None;
+        }
+
+        if !inner.shape.iter().zip(index).all(|(si, idx)| idx < si) {
+            return None;
+        }
+
+        let mut offset: usize = 0;
+        for i in 0..self.ndim() {
+            offset = offset * inner.shape[i] + index[i];
+        }
+
+        Some(inner.data[offset])
+    }
+
+    pub fn reshape(self, shape: Vec<usize>) -> Option<Self> {
         let new_shape_element_number: usize = shape.iter().product();
 
         if self.numel() == new_shape_element_number {
-            self.shape = shape;
+            self.inner.borrow_mut().shape = shape;
             Some(self)
         } else {
             None
         }
     }
 
-    fn binary_op<F>(&self, other: &Self, op: F) -> Option<Tensor>
+    fn from_operation(
+        data: Vec<f32>,
+        shape: Vec<usize>,
+        operation: Operation,
+        parents: Vec<Tensor>,
+    ) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(TensorInner {
+                data,
+                shape,
+                grad: None,
+                operation: Some(operation),
+                parents,
+            })),
+        }
+    }
+
+    fn binary_op<F>(&self, other: &Self, operation: Operation, op: F) -> Option<Tensor>
     where
         F: Fn(f32, f32) -> f32,
     {
-        let output_shape = Self::broadcast_shape(&self.shape, &other.shape)?;
+        let self_shape = self.inner.borrow().shape.clone();
+        let other_shape = other.inner.borrow().shape.clone();
 
+        let output_shape = Self::broadcast_shape(&self_shape, &other_shape)?;
         let output_numel: usize = output_shape.iter().product();
 
-        let mut data = Vec::with_capacity(output_numel);
+        let data = {
+            let self_inner = self.inner.borrow();
+            let other_inner = other.inner.borrow();
 
-        for output_offset in 0..output_numel {
-            let output_index = Self::unravel_index(output_offset, &output_shape);
+            let mut data = Vec::with_capacity(output_numel);
 
-            let self_offset = Self::broadcast_offset(&output_index, &self.shape);
+            for output_offset in 0..output_numel {
+                let output_index = Self::unravel_index(output_offset, &output_shape);
+                let self_offset = Self::broadcast_offset(&output_index, &self_shape);
+                let other_offset = Self::broadcast_offset(&output_index, &other_shape);
 
-            let other_offset = Self::broadcast_offset(&output_index, &other.shape);
+                data.push(op(
+                    self_inner.data[self_offset],
+                    other_inner.data[other_offset],
+                ));
+            }
 
-            data.push(op(self.data[self_offset], other.data[other_offset]));
-        }
+            data
+        };
 
-        Some(Self {
+        Some(Self::from_operation(
             data,
-            shape: output_shape,
-        })
+            output_shape,
+            operation,
+            vec![self.clone(), other.clone()],
+        ))
     }
 
     pub fn add(&self, other: &Self) -> Option<Tensor> {
-        self.binary_op(other, |x, y| x + y)
+        self.binary_op(other, Operation::Add, |x, y| x + y)
     }
 
     pub fn sub(&self, other: &Self) -> Option<Tensor> {
-        self.binary_op(other, |x, y| x - y)
+        self.binary_op(other, Operation::Sub, |x, y| x - y)
     }
 
     pub fn mul(&self, other: &Self) -> Option<Tensor> {
-        self.binary_op(other, |x, y| x * y)
+        self.binary_op(other, Operation::Mul, |x, y| x * y)
     }
 
     pub fn matmul(&self, other: &Self) -> Option<Tensor> {
-        if !(self.ndim() == 2 && other.ndim() == 2 && self.shape[1] == other.shape[0]) {
+        if !(self.ndim() == 2
+            && other.ndim() == 2
+            && self.inner.borrow().shape[1] == other.inner.borrow().shape[0])
+        {
             return None;
         }
 
-        let n = self.shape[0];
-        let k = self.shape[1];
-        let m = other.shape[1];
+        let (result, n, m) = {
+            let self_inner = self.inner.borrow();
+            let other_inner = other.inner.borrow();
 
-        let mut result = Vec::with_capacity(n * m);
+            let n = self_inner.shape[0];
+            let k = self_inner.shape[1];
+            let m = other_inner.shape[1];
 
-        for i in 0..n {
-            for j in 0..m {
-                let mut sum: f32 = 0.;
+            let mut result = Vec::with_capacity(n * m);
 
-                for t in 0..k {
-                    sum += self.data[k * i + t] * other.data[m * t + j];
+            for i in 0..n {
+                for j in 0..m {
+                    let mut sum: f32 = 0.;
+
+                    for t in 0..k {
+                        sum += self_inner.data[k * i + t] * other_inner.data[m * t + j];
+                    }
+
+                    result.push(sum);
                 }
-
-                result.push(sum);
             }
-        }
 
-        Some(Self {
-            data: result,
-            shape: vec![n, m],
-        })
+            (result, n, m)
+        };
+
+        Some(Self::from_operation(
+            result,
+            vec![n, m],
+            Operation::MatMul,
+            vec![self.clone(), other.clone()],
+        ))
     }
 
     pub fn sum(&self) -> Tensor {
-        Self {
-            data: vec![self.data.iter().sum::<f32>()],
-            shape: vec![1],
-        }
+        let data = {
+            let inner = self.inner.borrow();
+            vec![inner.data.iter().sum()]
+        };
+
+        Self::from_operation(data, vec![1], Operation::Sum, vec![self.clone()])
     }
 
     pub fn mean(&self) -> Tensor {
-        Self {
-            data: vec![self.data.iter().sum::<f32>() / self.numel() as f32],
-            shape: vec![1],
-        }
+        let data = {
+            let inner = self.inner.borrow();
+            vec![inner.data.iter().sum::<f32>() / inner.data.len() as f32]
+        };
+
+        Self::from_operation(data, vec![1], Operation::Mean, vec![self.clone()])
     }
 
     pub fn relu(&self) -> Tensor {
-        Self {
-            data: self.data.iter().map(|x| x.max(0.)).collect(),
-            shape: self.shape.clone(),
-        }
+        let (data, shape) = {
+            let inner = self.inner.borrow();
+
+            let data = inner.data.iter().map(|x| x.max(0.)).collect::<Vec<f32>>();
+
+            let shape = inner.shape.clone();
+
+            (data, shape)
+        };
+
+        Self::from_operation(data, shape, Operation::ReLU, vec![self.clone()])
     }
 
     fn unravel_index(mut offset: usize, shape: &[usize]) -> Vec<usize> {
@@ -289,7 +392,7 @@ mod tests {
 
         let reshaped = reshaped.unwrap();
 
-        assert_eq!(reshaped.shape(), &[4, 3, 2]);
+        assert_eq!(reshaped.shape(), vec![4, 3, 2]);
         assert_eq!(reshaped.ndim(), 3);
         assert_eq!(reshaped.numel(), 24);
 
@@ -360,5 +463,66 @@ mod tests {
             Some(vec![2, 3, 4])
         );
         assert_eq!(Tensor::broadcast_shape(&[2, 3], &[4, 3]), None);
+    }
+
+    #[test]
+    fn matmul() {
+        let a = Tensor::new(vec![1., 2., 3., 4., 5., 6.], vec![2, 3]).unwrap();
+
+        let b = Tensor::new(vec![7., 8., 9., 10., 11., 12.], vec![3, 2]).unwrap();
+
+        assert_eq!(
+            a.matmul(&b),
+            Tensor::new(vec![58., 64., 139., 154.], vec![2, 2],)
+        );
+    }
+
+    #[test]
+    fn computation_graph() {
+        let a = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
+        let b = Tensor::new(vec![5., 6., 7., 8.], vec![2, 2]).unwrap();
+
+        let c = a.mul(&b).unwrap();
+        let d = c.add(&a).unwrap();
+        let e = d.relu();
+        let f = e.sum();
+
+        {
+            let inner = c.inner.borrow();
+
+            assert!(matches!(inner.operation, Some(Operation::Mul)));
+            assert_eq!(inner.parents.len(), 2);
+
+            assert!(Rc::ptr_eq(&inner.parents[0].inner, &a.inner,));
+            assert!(Rc::ptr_eq(&inner.parents[1].inner, &b.inner,));
+        }
+
+        {
+            let inner = d.inner.borrow();
+
+            assert!(matches!(inner.operation, Some(Operation::Add)));
+            assert_eq!(inner.parents.len(), 2);
+
+            assert!(Rc::ptr_eq(&inner.parents[0].inner, &c.inner,));
+            assert!(Rc::ptr_eq(&inner.parents[1].inner, &a.inner,));
+        }
+
+        {
+            let inner = e.inner.borrow();
+
+            assert!(matches!(inner.operation, Some(Operation::ReLU)));
+            assert_eq!(inner.parents.len(), 1);
+
+            assert!(Rc::ptr_eq(&inner.parents[0].inner, &d.inner,));
+        }
+
+        {
+            let inner = f.inner.borrow();
+
+            assert!(matches!(inner.operation, Some(Operation::Sum)));
+            assert_eq!(inner.parents.len(), 1);
+
+            assert!(Rc::ptr_eq(&inner.parents[0].inner, &e.inner,));
+        }
     }
 }
