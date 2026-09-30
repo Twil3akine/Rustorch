@@ -44,6 +44,8 @@ enum Operation {
     Sum,
     Mean,
     ReLU,
+    Exp,
+    Log,
     Reshape,
 }
 
@@ -252,6 +254,38 @@ impl Tensor {
         };
 
         Self::from_operation(data, shape, Operation::ReLU, vec![self.clone()])
+    }
+
+    pub fn exp(&self) -> Tensor {
+        let (data, shape) = {
+            let inner = self.inner.borrow();
+
+            let data = inner
+                .data
+                .iter()
+                .map(|x| f32::exp(*x))
+                .collect::<Vec<f32>>();
+
+            let shape = inner.shape.clone();
+
+            (data, shape)
+        };
+
+        Self::from_operation(data, shape, Operation::Exp, vec![self.clone()])
+    }
+
+    pub fn log(&self) -> Tensor {
+        let (data, shape) = {
+            let inner = self.inner.borrow();
+
+            let data = inner.data.iter().map(|x| f32::ln(*x)).collect::<Vec<f32>>();
+
+            let shape = inner.shape.clone();
+
+            (data, shape)
+        };
+
+        Self::from_operation(data, shape, Operation::Log, vec![self.clone()])
     }
 
     fn unravel_index(mut offset: usize, shape: &[usize]) -> Vec<usize> {
@@ -521,6 +555,34 @@ impl Tensor {
                         .iter()
                         .zip(parent_data.iter())
                         .map(|(g, x)| if *x > 0. { *g } else { 0. })
+                        .collect::<Vec<f32>>();
+
+                    parent.accumulate_grad(&parent_grad);
+                }
+
+                Some(Operation::Exp) => {
+                    let parent = &parents[0];
+
+                    let output_data = tensor.inner.borrow().data.clone();
+
+                    let parent_grad = grad
+                        .iter()
+                        .zip(output_data.iter())
+                        .map(|(g, x)| g * x)
+                        .collect::<Vec<f32>>();
+
+                    parent.accumulate_grad(&parent_grad);
+                }
+
+                Some(Operation::Log) => {
+                    let parent = &parents[0];
+
+                    let parent_data = parent.inner.borrow().data.clone();
+
+                    let parent_grad = grad
+                        .iter()
+                        .zip(parent_data.iter())
+                        .map(|(g, x)| g / x)
                         .collect::<Vec<f32>>();
 
                     parent.accumulate_grad(&parent_grad);
@@ -889,6 +951,26 @@ mod tests {
             y.backward();
 
             assert_eq!(x.grad(), Some(vec![1., 1., 1., 1.]));
+        }
+
+        // Exp
+        {
+            let x = Tensor::new(vec![0., 1.], vec![2]).unwrap();
+
+            let y = x.exp().sum();
+            y.backward();
+
+            assert_eq!(x.grad(), Some(vec![1., std::f32::consts::E]));
+        }
+
+        // Log
+        {
+            let x = Tensor::new(vec![1., std::f32::consts::E], vec![2]).unwrap();
+
+            let y = x.log().sum();
+            y.backward();
+
+            assert_eq!(x.grad(), Some(vec![1., 1. / std::f32::consts::E]));
         }
     }
 }
