@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 #[derive(Clone)]
@@ -294,6 +295,234 @@ impl Tensor {
 
         offset
     }
+
+    pub fn grad(&self) -> Option<Vec<f32>> {
+        self.inner.borrow().grad.clone()
+    }
+
+    fn accumulate_grad(&self, grad: &[f32]) {
+        let mut inner = self.inner.borrow_mut();
+
+        assert_eq!(inner.data.len(), grad.len());
+
+        match &mut inner.grad {
+            Some(current_grad) => {
+                for (current, incoming) in current_grad.iter_mut().zip(grad) {
+                    *current += incoming;
+                }
+            }
+            None => {
+                inner.grad = Some(grad.to_vec());
+            }
+        }
+    }
+
+    pub fn backward(&self) {
+        assert_eq!(
+            self.numel(),
+            1,
+            "backward() currently requires a scalar tensor."
+        );
+
+        let mut topo = Vec::new();
+        let mut visited = HashSet::new();
+
+        let mut stack = vec![(self.clone(), false)];
+
+        // 親方向にDFSして、トポロジカルソート
+        while let Some((tensor, expanded)) = stack.pop() {
+            let ptr = Rc::as_ptr(&tensor.inner);
+
+            if expanded {
+                topo.push(tensor);
+                continue;
+            }
+
+            if !visited.insert(ptr) {
+                continue;
+            }
+
+            stack.push((tensor.clone(), true));
+
+            let parents = tensor.inner.borrow().parents.clone();
+
+            for parent in parents {
+                stack.push((parent, false));
+            }
+        }
+
+        // dy/dx = 1
+        self.accumulate_grad(&[1.]);
+
+        for tensor in topo.into_iter().rev() {
+            let (grad, operation, parents) = {
+                let inner = tensor.inner.borrow();
+
+                (
+                    inner.grad.clone(),
+                    inner.operation.clone(),
+                    inner.parents.clone(),
+                )
+            };
+
+            let Some(grad) = grad else {
+                continue;
+            };
+
+            match operation {
+                Some(Operation::Add) => {
+                    let output_shape = tensor.shape();
+
+                    for parent in &parents {
+                        let parent_shape = parent.shape();
+                        let mut parent_grad = vec![0.; parent.numel()];
+
+                        for output_offset in 0..grad.len() {
+                            let output_index = Self::unravel_index(output_offset, &output_shape);
+                            let parent_offset =
+                                Self::broadcast_offset(&output_index, &parent_shape);
+
+                            parent_grad[parent_offset] += grad[output_offset];
+                        }
+
+                        parent.accumulate_grad(&parent_grad);
+                    }
+                }
+
+                Some(Operation::Sub) => {
+                    let lhs = &parents[0];
+                    let rhs = &parents[1];
+
+                    let lhs_shape = lhs.shape();
+                    let rhs_shape = rhs.shape();
+                    let output_shape = tensor.shape();
+
+                    let mut lhs_grad = vec![0.; lhs.numel()];
+                    let mut rhs_grad = vec![0.; rhs.numel()];
+
+                    for output_offset in 0..grad.len() {
+                        let output_index = Self::unravel_index(output_offset, &output_shape);
+
+                        let lhs_offset = Self::broadcast_offset(&output_index, &lhs_shape);
+                        let rhs_offset = Self::broadcast_offset(&output_index, &rhs_shape);
+
+                        lhs_grad[lhs_offset] += grad[output_offset];
+                        rhs_grad[rhs_offset] -= grad[output_offset];
+                    }
+
+                    lhs.accumulate_grad(&lhs_grad);
+                    rhs.accumulate_grad(&rhs_grad);
+                }
+
+                Some(Operation::Mul) => {
+                    let lhs = &parents[0];
+                    let rhs = &parents[1];
+
+                    let lhs_shape = lhs.shape();
+                    let rhs_shape = rhs.shape();
+                    let output_shape = tensor.shape();
+
+                    let lhs_data = lhs.inner.borrow().data.clone();
+                    let rhs_data = rhs.inner.borrow().data.clone();
+
+                    let mut lhs_grad = vec![0.; lhs.numel()];
+                    let mut rhs_grad = vec![0.; rhs.numel()];
+
+                    for output_offset in 0..grad.len() {
+                        let output_index = Self::unravel_index(output_offset, &output_shape);
+
+                        let lhs_offset = Self::broadcast_offset(&output_index, &lhs_shape);
+                        let rhs_offset = Self::broadcast_offset(&output_index, &rhs_shape);
+
+                        lhs_grad[lhs_offset] += grad[output_offset] * rhs_data[rhs_offset];
+                        rhs_grad[rhs_offset] += grad[output_offset] * lhs_data[lhs_offset];
+                    }
+
+                    lhs.accumulate_grad(&lhs_grad);
+                    rhs.accumulate_grad(&rhs_grad);
+                }
+
+                Some(Operation::Sum) => {
+                    let parent = &parents[0];
+                    let parent_grad = vec![grad[0]; parent.numel()];
+
+                    parent.accumulate_grad(&parent_grad);
+                }
+
+                Some(Operation::Mean) => {
+                    let parent = &parents[0];
+                    let n = parent.numel() as f32;
+
+                    let parent_grad = vec![grad[0] / n; parent.numel()];
+
+                    parent.accumulate_grad(&parent_grad);
+                }
+
+                Some(Operation::ReLU) => {
+                    let parent = &parents[0];
+
+                    let parent_data = parent.inner.borrow().data.clone();
+
+                    let parent_grad = grad
+                        .iter()
+                        .zip(parent_data.iter())
+                        .map(|(g, x)| if *x > 0. { *g } else { 0. })
+                        .collect::<Vec<f32>>();
+
+                    parent.accumulate_grad(&parent_grad);
+                }
+
+                Some(Operation::MatMul) => {
+                    let lhs = &parents[0];
+                    let rhs = &parents[1];
+
+                    let lhs_shape = lhs.shape();
+                    let rhs_shape = rhs.shape();
+
+                    let n = lhs_shape[0];
+                    let k = lhs_shape[1];
+                    let m = rhs_shape[1];
+
+                    let lhs_data = lhs.inner.borrow().data.clone();
+                    let rhs_data = rhs.inner.borrow().data.clone();
+
+                    let mut lhs_grad = vec![0.0; lhs.numel()];
+                    let mut rhs_grad = vec![0.0; rhs.numel()];
+
+                    // dL/dA = G @ B^T
+                    for i in 0..n {
+                        for t in 0..k {
+                            let mut sum = 0.0;
+
+                            for j in 0..m {
+                                sum += grad[i * m + j] * rhs_data[t * m + j];
+                            }
+
+                            lhs_grad[i * k + t] = sum;
+                        }
+                    }
+
+                    // dL/dB = A^T @ G
+                    for t in 0..k {
+                        for j in 0..m {
+                            let mut sum = 0.0;
+
+                            for i in 0..n {
+                                sum += lhs_data[i * k + t] * grad[i * m + j];
+                            }
+
+                            rhs_grad[t * m + j] = sum;
+                        }
+                    }
+
+                    lhs.accumulate_grad(&lhs_grad);
+                    rhs.accumulate_grad(&rhs_grad);
+                }
+
+                _ => {}
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -523,6 +752,116 @@ mod tests {
             assert_eq!(inner.parents.len(), 1);
 
             assert!(Rc::ptr_eq(&inner.parents[0].inner, &e.inner,));
+        }
+    }
+
+    #[test]
+    fn accumulate_gradient() {
+        let x = Tensor::new(vec![1., 2.], vec![2]).unwrap();
+
+        assert_eq!(x.grad(), None);
+
+        x.accumulate_grad(&[3., 4.]);
+        assert_eq!(x.grad(), Some(vec![3., 4.]));
+
+        x.accumulate_grad(&[1., 2.]);
+        assert_eq!(x.grad(), Some(vec![4., 6.]));
+    }
+
+    #[test]
+    fn backward() {
+        let a = Tensor::new(vec![1., 2.], vec![2]).unwrap();
+        let b = Tensor::new(vec![3., 4.], vec![2]).unwrap();
+
+        let c = a.add(&b).unwrap();
+        let y = c.sum();
+
+        // Add + Sum
+        {
+            let a = Tensor::new(vec![1., 2.], vec![2]).unwrap();
+            let b = Tensor::new(vec![3., 4.], vec![2]).unwrap();
+
+            let c = a.add(&b).unwrap();
+            let y = c.sum();
+
+            y.backward();
+
+            assert_eq!(a.grad(), Some(vec![1., 1.]));
+            assert_eq!(b.grad(), Some(vec![1., 1.]));
+        }
+
+        // Sub + Sum
+        {
+            let a = Tensor::new(vec![1., 2.], vec![2]).unwrap();
+            let b = Tensor::new(vec![3., 4.], vec![2]).unwrap();
+
+            let c = a.sub(&b).unwrap();
+            let y = c.sum();
+
+            y.backward();
+
+            assert_eq!(a.grad(), Some(vec![1., 1.]));
+            assert_eq!(b.grad(), Some(vec![-1., -1.]));
+        }
+
+        // x * x
+        {
+            let x = Tensor::new(vec![2.], vec![1]).unwrap();
+
+            let y = x.mul(&x).unwrap();
+
+            y.backward();
+
+            assert_eq!(x.grad(), Some(vec![4.]));
+        }
+
+        // Mean
+        {
+            let x = Tensor::new(vec![2., 4.], vec![2]).unwrap();
+
+            let y = x.mean();
+            y.backward();
+
+            assert_eq!(x.grad(), Some(vec![0.5, 0.5]));
+        }
+
+        // ReLU + Sum
+        {
+            let x = Tensor::new(vec![-2., 3., -1., 5.], vec![4]).unwrap();
+
+            let y = x.relu().sum();
+            y.backward();
+
+            assert_eq!(x.grad(), Some(vec![0., 1., 0., 1.]));
+        }
+
+        // broadcasting
+        {
+            let a = Tensor::new(vec![1., 2., 3., 4., 5., 6.], vec![2, 3]).unwrap();
+
+            let b = Tensor::new(vec![10., 20., 30.], vec![3]).unwrap();
+
+            let y = a.add(&b).unwrap().sum();
+
+            y.backward();
+
+            assert_eq!(a.grad(), Some(vec![1., 1., 1., 1., 1., 1.]));
+
+            assert_eq!(b.grad(), Some(vec![2., 2., 2.]));
+        }
+
+        {
+            let a = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
+
+            let b = Tensor::new(vec![5., 6.], vec![2, 1]).unwrap();
+
+            let y = a.matmul(&b).unwrap().sum();
+
+            y.backward();
+
+            assert_eq!(a.grad(), Some(vec![5., 6., 5., 6.,]));
+
+            assert_eq!(b.grad(), Some(vec![4., 6.,]));
         }
     }
 }

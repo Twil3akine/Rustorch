@@ -1,8 +1,6 @@
 #![allow(unused)]
 
-mod lib;
-
-use crate::lib::tensor::Tensor;
+use rustorch::tensor::Tensor;
 
 fn main() {
     let tensor = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
