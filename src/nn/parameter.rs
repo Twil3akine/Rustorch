@@ -1,3 +1,5 @@
+use std::os::unix::raw::mode_t;
+
 use crate::tensor::Tensor;
 
 pub struct Parameter {
@@ -74,6 +76,38 @@ impl Module for ReLU {
     }
 }
 
+pub struct Sequential {
+    modules: Vec<Box<dyn Module>>,
+}
+
+impl Sequential {
+    pub fn new(modules: Vec<Box<dyn Module>>) -> Self {
+        Self { modules }
+    }
+}
+
+impl Module for Sequential {
+    fn forward(&self, input: &Tensor) -> Tensor {
+        let mut output = input.clone();
+
+        for module in &self.modules {
+            output = module.forward(&output);
+        }
+
+        output
+    }
+
+    fn parameters(&self) -> Vec<&Parameter> {
+        let mut parameters = Vec::new();
+
+        for module in &self.modules {
+            parameters.extend(module.parameters());
+        }
+
+        parameters
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +166,33 @@ mod tests {
         );
 
         assert!(relu.parameters().is_empty());
+    }
+
+    #[test]
+    fn sequential() {
+        let model = Sequential::new(vec![
+            Box::new(Linear::new(3, 4)),
+            Box::new(ReLU),
+            Box::new(Linear::new(4, 2)),
+        ]);
+
+        let input = Tensor::new(vec![1., 2., 3., 4., 5., 6.], vec![2, 3]).unwrap();
+
+        let output = model.forward(&input);
+
+        // [2,3] -> [2,4] -> [2,4] -> [2,2]
+        assert_eq!(output.shape(), vec![2, 2]);
+
+        // Linear 2層 × (weight + bias)
+        let parameters = model.parameters();
+        assert_eq!(parameters.len(), 4);
+
+        let loss = output.sum();
+        loss.backward();
+
+        // 全Parameterまで勾配が到達していることを確認
+        for parameter in parameters {
+            assert!(parameter.tensor().grad().is_some());
+        }
     }
 }
