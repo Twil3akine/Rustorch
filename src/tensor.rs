@@ -44,9 +44,11 @@ enum Operation {
     Sum,
     Mean,
     ReLU,
+    LogSoftmax,
     Exp,
     Log,
     Reshape,
+    Gather(Vec<usize>),
 }
 
 impl Tensor {
@@ -256,6 +258,36 @@ impl Tensor {
         Self::from_operation(data, shape, Operation::ReLU, vec![self.clone()])
     }
 
+    pub fn log_softmax(&self) -> Tensor {
+        assert_eq!(self.ndim(), 2);
+
+        let inner = self.inner.borrow();
+
+        let n = inner.shape[0];
+        let c = inner.shape[1];
+
+        let mut data = Vec::with_capacity(inner.data.len());
+
+        for i in 0..n {
+            let row = &inner.data[i * c..(i + 1) * c];
+
+            let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+            let exp_sum = row.iter().map(|x| (*x - max).exp()).sum::<f32>();
+
+            let log_sum_exp = exp_sum.ln();
+
+            for x in row {
+                data.push((*x - max) - log_sum_exp);
+            }
+        }
+
+        let shape = inner.shape.clone();
+        drop(inner);
+
+        Self::from_operation(data, shape, Operation::LogSoftmax, vec![self.clone()])
+    }
+
     pub fn exp(&self) -> Tensor {
         let (data, shape) = {
             let inner = self.inner.borrow();
@@ -286,6 +318,36 @@ impl Tensor {
         };
 
         Self::from_operation(data, shape, Operation::Log, vec![self.clone()])
+    }
+
+    pub fn gather(&self, indices: &[usize]) -> Tensor {
+        assert_eq!(self.ndim(), 2);
+
+        let inner = self.inner.borrow();
+
+        let n = inner.shape[0];
+        let c = inner.shape[1];
+
+        assert_eq!(indices.len(), n);
+
+        let mut data = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let j = indices[i];
+
+            assert!(j < c);
+
+            data.push(inner.data[i * c + j]);
+        }
+
+        drop(inner);
+
+        Self::from_operation(
+            data,
+            vec![n],
+            Operation::Gather(indices.to_vec()),
+            vec![self.clone()],
+        )
     }
 
     fn unravel_index(mut offset: usize, shape: &[usize]) -> Vec<usize> {
@@ -560,6 +622,35 @@ impl Tensor {
                     parent.accumulate_grad(&parent_grad);
                 }
 
+                Some(Operation::LogSoftmax) => {
+                    let parent = &parents[0];
+
+                    let shape = tensor.shape();
+                    let n = shape[0];
+                    let c = shape[1];
+
+                    let output_data = tensor.inner.borrow().data.clone();
+
+                    let mut parent_grad = vec![0.; parent.numel()];
+
+                    for i in 0..n {
+                        let start = i * c;
+                        let end = (i + 1) * c;
+
+                        let grad_sum = grad[start..end].iter().sum::<f32>();
+
+                        for j in 0..c {
+                            let index = start + j;
+
+                            let probability = output_data[index].exp();
+
+                            parent_grad[index] = grad[index] - probability * grad_sum;
+                        }
+                    }
+
+                    parent.accumulate_grad(&parent_grad);
+                }
+
                 Some(Operation::Exp) => {
                     let parent = &parents[0];
 
@@ -584,6 +675,24 @@ impl Tensor {
                         .zip(parent_data.iter())
                         .map(|(g, x)| g / x)
                         .collect::<Vec<f32>>();
+
+                    parent.accumulate_grad(&parent_grad);
+                }
+
+                Some(Operation::Gather(indices)) => {
+                    let parent = &parents[0];
+
+                    let shape = parent.shape();
+                    let c = shape[1];
+
+                    let mut parent_grad = vec![0.; parent.numel()];
+
+                    for i in 0..indices.len() {
+                        let j = indices[i];
+                        let offset = i * c + j;
+
+                        parent_grad[offset] += grad[i];
+                    }
 
                     parent.accumulate_grad(&parent_grad);
                 }
@@ -971,6 +1080,28 @@ mod tests {
             y.backward();
 
             assert_eq!(x.grad(), Some(vec![1., 1. / std::f32::consts::E]));
+        }
+
+        {
+            let x = Tensor::new(vec![2., 1., 0.], vec![1, 3]).unwrap();
+
+            let y = x.log_softmax().sum();
+            y.backward();
+
+            let grad = x.grad().unwrap();
+
+            assert!((grad[0] - -0.9957229).abs() < 1e-5);
+            assert!((grad[1] - 0.2658146).abs() < 1e-5);
+            assert!((grad[2] - 0.7299083).abs() < 1e-5);
+        }
+
+        {
+            let x = Tensor::new(vec![10., 20., 30., 40., 50., 60.], vec![2, 3]).unwrap();
+
+            let y = x.gather(&[2, 0]).sum();
+            y.backward();
+
+            assert_eq!(x.grad(), Some(vec![0., 0., 1., 1., 0., 0.,]));
         }
     }
 }
