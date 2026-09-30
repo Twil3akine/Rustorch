@@ -108,6 +108,21 @@ impl Module for Sequential {
     }
 }
 
+pub trait Loss {
+    fn forward(&self, prediction: &Tensor, target: &Tensor) -> Tensor;
+}
+
+pub struct MSELoss;
+
+impl Loss for MSELoss {
+    fn forward(&self, prediction: &Tensor, target: &Tensor) -> Tensor {
+        let diff = prediction.sub(target).unwrap();
+        let squared = diff.mul(&diff).unwrap();
+
+        squared.mean()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +209,22 @@ mod tests {
         for parameter in parameters {
             assert!(parameter.tensor().grad().is_some());
         }
+    }
+
+    #[test]
+    fn mse_loss() {
+        let mse = MSELoss;
+
+        let prediction = Tensor::new(vec![2., 4.], vec![2]).unwrap();
+
+        let target = Tensor::new(vec![1., 6.], vec![2]).unwrap();
+
+        let loss = mse.forward(&prediction, &target);
+
+        assert_eq!(loss, Tensor::new(vec![2.5], vec![1]).unwrap());
+
+        loss.backward();
+
+        assert_eq!(prediction.grad(), Some(vec![1., -2.]));
     }
 }
