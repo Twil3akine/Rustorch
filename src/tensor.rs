@@ -37,6 +37,7 @@ struct TensorInner {
 
 #[derive(Clone, Debug)]
 enum Operation {
+    Neg,
     Add,
     Sub,
     Mul,
@@ -171,6 +172,20 @@ impl Tensor {
             operation,
             vec![self.clone(), other.clone()],
         ))
+    }
+
+    pub fn neg(&self) -> Tensor {
+        let (data, shape) = {
+            let inner = self.inner.borrow();
+
+            let data = inner.data.iter().map(|x| -x).collect::<Vec<f32>>();
+
+            let shape = inner.shape.clone();
+
+            (data, shape)
+        };
+
+        Self::from_operation(data, shape, Operation::Neg, vec![self.clone()])
     }
 
     pub fn add(&self, other: &Self) -> Option<Tensor> {
@@ -473,6 +488,13 @@ impl Tensor {
             };
 
             match operation {
+                Some(Operation::Neg) => {
+                    let parent = &parents[0];
+                    let parent_grad = grad.iter().map(|g| -g).collect::<Vec<f32>>();
+
+                    parent.accumulate_grad(&parent_grad);
+                }
+
                 Some(Operation::Add) => {
                     let output_shape = tensor.shape();
 
@@ -1102,6 +1124,15 @@ mod tests {
             y.backward();
 
             assert_eq!(x.grad(), Some(vec![0., 0., 1., 1., 0., 0.,]));
+        }
+
+        {
+            let x = Tensor::new(vec![1., -2., 3.], vec![3]).unwrap();
+
+            let y = x.neg().sum();
+            y.backward();
+
+            assert_eq!(x.grad(), Some(vec![-1., -1., -1.]));
         }
     }
 }
