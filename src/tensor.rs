@@ -44,6 +44,7 @@ enum Operation {
     Sum,
     Mean,
     ReLU,
+    Reshape,
 }
 
 impl Tensor {
@@ -96,15 +97,21 @@ impl Tensor {
         Some(inner.data[offset])
     }
 
-    pub fn reshape(self, shape: Vec<usize>) -> Option<Self> {
-        let new_shape_element_number: usize = shape.iter().product();
+    pub fn reshape(&self, shape: Vec<usize>) -> Option<Self> {
+        let new_numel: usize = shape.iter().product();
 
-        if self.numel() == new_shape_element_number {
-            self.inner.borrow_mut().shape = shape;
-            Some(self)
-        } else {
-            None
+        if self.numel() != new_numel {
+            return None;
         }
+
+        let data = self.inner.borrow().data.clone();
+
+        Some(Self::from_operation(
+            data,
+            shape,
+            Operation::Reshape,
+            vec![self.clone()],
+        ))
     }
 
     fn from_operation(
@@ -442,36 +449,6 @@ impl Tensor {
                     rhs.accumulate_grad(&rhs_grad);
                 }
 
-                Some(Operation::Sum) => {
-                    let parent = &parents[0];
-                    let parent_grad = vec![grad[0]; parent.numel()];
-
-                    parent.accumulate_grad(&parent_grad);
-                }
-
-                Some(Operation::Mean) => {
-                    let parent = &parents[0];
-                    let n = parent.numel() as f32;
-
-                    let parent_grad = vec![grad[0] / n; parent.numel()];
-
-                    parent.accumulate_grad(&parent_grad);
-                }
-
-                Some(Operation::ReLU) => {
-                    let parent = &parents[0];
-
-                    let parent_data = parent.inner.borrow().data.clone();
-
-                    let parent_grad = grad
-                        .iter()
-                        .zip(parent_data.iter())
-                        .map(|(g, x)| if *x > 0. { *g } else { 0. })
-                        .collect::<Vec<f32>>();
-
-                    parent.accumulate_grad(&parent_grad);
-                }
-
                 Some(Operation::MatMul) => {
                     let lhs = &parents[0];
                     let rhs = &parents[1];
@@ -517,6 +494,40 @@ impl Tensor {
 
                     lhs.accumulate_grad(&lhs_grad);
                     rhs.accumulate_grad(&rhs_grad);
+                }
+
+                Some(Operation::Sum) => {
+                    let parent = &parents[0];
+                    let parent_grad = vec![grad[0]; parent.numel()];
+
+                    parent.accumulate_grad(&parent_grad);
+                }
+
+                Some(Operation::Mean) => {
+                    let parent = &parents[0];
+                    let n = parent.numel() as f32;
+
+                    let parent_grad = vec![grad[0] / n; parent.numel()];
+
+                    parent.accumulate_grad(&parent_grad);
+                }
+
+                Some(Operation::ReLU) => {
+                    let parent = &parents[0];
+
+                    let parent_data = parent.inner.borrow().data.clone();
+
+                    let parent_grad = grad
+                        .iter()
+                        .zip(parent_data.iter())
+                        .map(|(g, x)| if *x > 0. { *g } else { 0. })
+                        .collect::<Vec<f32>>();
+
+                    parent.accumulate_grad(&parent_grad);
+                }
+
+                Some(Operation::Reshape) => {
+                    parents[0].accumulate_grad(&grad);
                 }
 
                 _ => {}
@@ -862,6 +873,15 @@ mod tests {
             assert_eq!(a.grad(), Some(vec![5., 6., 5., 6.,]));
 
             assert_eq!(b.grad(), Some(vec![4., 6.,]));
+        }
+
+        {
+            let x = Tensor::new(vec![1., 2., 3., 4.], vec![2, 2]).unwrap();
+
+            let y = x.reshape(vec![4]).unwrap().sum();
+            y.backward();
+
+            assert_eq!(x.grad(), Some(vec![1., 1., 1., 1.]));
         }
     }
 }
