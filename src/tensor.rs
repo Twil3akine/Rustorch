@@ -71,6 +71,10 @@ impl Tensor {
         })
     }
 
+    pub fn data(&self) -> Vec<f32> {
+        self.inner.borrow().data.clone()
+    }
+
     pub fn shape(&self) -> Vec<usize> {
         self.inner.borrow().shape.clone()
     }
@@ -730,6 +734,18 @@ impl Tensor {
 
     pub fn zero_grad(&self) {
         self.inner.borrow_mut().grad = None;
+    }
+
+    pub(crate) fn apply_grad(&self, lr: f32) {
+        let mut inner = self.inner.borrow_mut();
+
+        let Some(grad) = inner.grad.clone() else {
+            return;
+        };
+
+        for (data, grad) in inner.data.iter_mut().zip(grad) {
+            *data -= lr * grad;
+        }
     }
 }
 
