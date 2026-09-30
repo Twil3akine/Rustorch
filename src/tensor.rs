@@ -534,6 +534,10 @@ impl Tensor {
             }
         }
     }
+
+    pub fn zero_grad(&self) {
+        self.inner.borrow_mut().grad = None;
+    }
 }
 
 #[cfg(test)]
@@ -777,6 +781,9 @@ mod tests {
 
         x.accumulate_grad(&[1., 2.]);
         assert_eq!(x.grad(), Some(vec![4., 6.]));
+
+        x.zero_grad();
+        assert_eq!(x.grad(), None);
     }
 
     #[test]
