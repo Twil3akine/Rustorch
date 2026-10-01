@@ -5,6 +5,7 @@ use std::rc::Rc;
 use crate::autograd::grad_enabled;
 use crate::backend::Device;
 use crate::backend::{Backend, cpu::Cpu, storage::Storage};
+use crate::shape::*;
 
 #[derive(Clone, Debug)]
 enum Operation {
@@ -160,38 +161,30 @@ impl Tensor {
         }
     }
 
-    fn binary_op<F>(&self, other: &Self, operation: Operation, op: F) -> Option<Tensor>
-    where
-        F: Fn(f32, f32) -> f32,
-    {
+    fn binary_op(&self, other: &Self, operation: Operation) -> Option<Tensor> {
         if self.device() != other.device() {
             return None;
         }
 
-        let self_shape = self.inner.borrow().shape.clone();
-        let other_shape = other.inner.borrow().shape.clone();
+        let lhs_shape = self.shape();
+        let rhs_shape = other.shape();
 
-        let output_shape = Self::broadcast_shape(&self_shape, &other_shape)?;
-        let output_numel: usize = output_shape.iter().product();
+        let output_shape = Self::broadcast_shape(&lhs_shape, &rhs_shape)?;
 
-        let data = {
-            let self_inner = self.inner.borrow();
-            let other_inner = other.inner.borrow();
+        let lhs = self.data();
+        let rhs = other.data();
 
-            let mut data = Vec::with_capacity(output_numel);
-
-            for output_offset in 0..output_numel {
-                let output_index = Self::unravel_index(output_offset, &output_shape);
-                let self_offset = Self::broadcast_offset(&output_index, &self_shape);
-                let other_offset = Self::broadcast_offset(&output_index, &other_shape);
-
-                data.push(op(
-                    self_inner.storage.data()[self_offset],
-                    other_inner.storage.data()[other_offset],
-                ));
+        let data = match (self.device(), &operation) {
+            (Device::Cpu, Operation::Add) => {
+                Cpu::add(&lhs, &rhs, &lhs_shape, &rhs_shape, &output_shape)
             }
-
-            data
+            (Device::Cpu, Operation::Sub) => {
+                Cpu::sub(&lhs, &rhs, &lhs_shape, &rhs_shape, &output_shape)
+            }
+            (Device::Cpu, Operation::Mul) => {
+                Cpu::mul(&lhs, &rhs, &lhs_shape, &rhs_shape, &output_shape)
+            }
+            _ => unreachable!(),
         };
 
         Some(Self::from_operation(
@@ -206,12 +199,9 @@ impl Tensor {
         let (data, shape) = {
             let inner = self.inner.borrow();
 
-            let data = inner
-                .storage
-                .data()
-                .iter()
-                .map(|x| -x)
-                .collect::<Vec<f32>>();
+            let data = match inner.storage.device() {
+                Device::Cpu => Cpu::neg(inner.storage.data()),
+            };
 
             let shape = inner.shape.clone();
 
@@ -222,15 +212,15 @@ impl Tensor {
     }
 
     pub fn add(&self, other: &Self) -> Option<Tensor> {
-        self.binary_op(other, Operation::Add, |x, y| x + y)
+        self.binary_op(other, Operation::Add)
     }
 
     pub fn sub(&self, other: &Self) -> Option<Tensor> {
-        self.binary_op(other, Operation::Sub, |x, y| x - y)
+        self.binary_op(other, Operation::Sub)
     }
 
     pub fn mul(&self, other: &Self) -> Option<Tensor> {
-        self.binary_op(other, Operation::Mul, |x, y| x * y)
+        self.binary_op(other, Operation::Mul)
     }
 
     pub fn matmul(&self, other: &Self) -> Option<Tensor> {
@@ -293,12 +283,9 @@ impl Tensor {
         let (data, shape) = {
             let inner = self.inner.borrow();
 
-            let data = inner
-                .storage
-                .data()
-                .iter()
-                .map(|x| x.max(0.))
-                .collect::<Vec<f32>>();
+            let data = match inner.storage.device() {
+                Device::Cpu => Cpu::relu(inner.storage.data()),
+            };
 
             let shape = inner.shape.clone();
 
@@ -342,12 +329,9 @@ impl Tensor {
         let (data, shape) = {
             let inner = self.inner.borrow();
 
-            let data = inner
-                .storage
-                .data()
-                .iter()
-                .map(|x| f32::exp(*x))
-                .collect::<Vec<f32>>();
+            let data = match inner.storage.device() {
+                Device::Cpu => Cpu::exp(inner.storage.data()),
+            };
 
             let shape = inner.shape.clone();
 
@@ -361,12 +345,9 @@ impl Tensor {
         let (data, shape) = {
             let inner = self.inner.borrow();
 
-            let data = inner
-                .storage
-                .data()
-                .iter()
-                .map(|x| f32::ln(*x))
-                .collect::<Vec<f32>>();
+            let data = match inner.storage.device() {
+                Device::Cpu => Cpu::log(inner.storage.data()),
+            };
 
             let shape = inner.shape.clone();
 
@@ -406,17 +387,6 @@ impl Tensor {
         )
     }
 
-    fn unravel_index(mut offset: usize, shape: &[usize]) -> Vec<usize> {
-        let mut index = vec![0; shape.len()];
-
-        for i in (0..shape.len()).rev() {
-            index[i] = offset % shape[i];
-            offset /= shape[i];
-        }
-
-        index
-    }
-
     fn broadcast_shape(x: &[usize], y: &[usize]) -> Option<Vec<usize>> {
         let ndim = x.len().max(y.len());
         let mut result = Vec::new();
@@ -435,24 +405,6 @@ impl Tensor {
         result.reverse();
 
         Some(result)
-    }
-
-    fn broadcast_offset(output_index: &[usize], input_shape: &[usize]) -> usize {
-        let shift = output_index.len() - input_shape.len();
-
-        let mut offset = 0;
-
-        for i in 0..input_shape.len() {
-            let dim = input_shape[i];
-
-            let output_i = output_index[shift + i];
-
-            let input_i = if dim == 1 { 0 } else { output_i };
-
-            offset = offset * dim + input_i;
-        }
-
-        offset
     }
 
     pub fn grad(&self) -> Option<Vec<f32>> {
@@ -544,9 +496,8 @@ impl Tensor {
                         let mut parent_grad = vec![0.; parent.numel()];
 
                         for output_offset in 0..grad.len() {
-                            let output_index = Self::unravel_index(output_offset, &output_shape);
-                            let parent_offset =
-                                Self::broadcast_offset(&output_index, &parent_shape);
+                            let output_index = unravel_index(output_offset, &output_shape);
+                            let parent_offset = broadcast_offset(&output_index, &parent_shape);
 
                             parent_grad[parent_offset] += grad[output_offset];
                         }
@@ -567,10 +518,10 @@ impl Tensor {
                     let mut rhs_grad = vec![0.; rhs.numel()];
 
                     for output_offset in 0..grad.len() {
-                        let output_index = Self::unravel_index(output_offset, &output_shape);
+                        let output_index = unravel_index(output_offset, &output_shape);
 
-                        let lhs_offset = Self::broadcast_offset(&output_index, &lhs_shape);
-                        let rhs_offset = Self::broadcast_offset(&output_index, &rhs_shape);
+                        let lhs_offset = broadcast_offset(&output_index, &lhs_shape);
+                        let rhs_offset = broadcast_offset(&output_index, &rhs_shape);
 
                         lhs_grad[lhs_offset] += grad[output_offset];
                         rhs_grad[rhs_offset] -= grad[output_offset];
@@ -595,10 +546,10 @@ impl Tensor {
                     let mut rhs_grad = vec![0.; rhs.numel()];
 
                     for output_offset in 0..grad.len() {
-                        let output_index = Self::unravel_index(output_offset, &output_shape);
+                        let output_index = unravel_index(output_offset, &output_shape);
 
-                        let lhs_offset = Self::broadcast_offset(&output_index, &lhs_shape);
-                        let rhs_offset = Self::broadcast_offset(&output_index, &rhs_shape);
+                        let lhs_offset = broadcast_offset(&output_index, &lhs_shape);
+                        let rhs_offset = broadcast_offset(&output_index, &rhs_shape);
 
                         lhs_grad[lhs_offset] += grad[output_offset] * rhs_data[rhs_offset];
                         rhs_grad[rhs_offset] += grad[output_offset] * lhs_data[lhs_offset];
