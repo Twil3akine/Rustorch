@@ -1,6 +1,8 @@
 #![allow(unused)]
 
+use rustorch::data::*;
 use rustorch::nn::*;
+use rustorch::optim::*;
 use rustorch::tensor::*;
 
 fn main() {
