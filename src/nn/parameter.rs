@@ -1,4 +1,4 @@
-use crate::{nn::parameter, tensor::Tensor};
+use crate::tensor::Tensor;
 
 pub struct Parameter {
     tensor: Tensor,

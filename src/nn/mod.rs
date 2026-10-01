@@ -1,3 +1,3 @@
 mod parameter;
 
-pub use parameter::Parameter;
+pub use parameter::*;
