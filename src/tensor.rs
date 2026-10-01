@@ -747,6 +747,87 @@ impl Tensor {
             *data -= lr * grad;
         }
     }
+
+    pub fn slice_rows(&self, start: usize, end: usize) -> Option<Tensor> {
+        let inner = self.inner.borrow();
+
+        if !(inner.shape.len() == 2 && start <= end && end <= inner.shape[0]) {
+            return None;
+        }
+
+        let d = inner.shape[1];
+
+        let output = inner.data[start * d..end * d].to_vec();
+
+        Tensor::new(output, vec![end - start, d])
+    }
+}
+
+pub struct TensorDataset {
+    inputs: Tensor,
+    targets: Tensor,
+}
+
+impl TensorDataset {
+    pub fn new(inputs: Tensor, targets: Tensor) -> Option<Self> {
+        if inputs.ndim() != 2 || targets.ndim() != 2 {
+            return None;
+        }
+
+        if inputs.shape()[0] != targets.shape()[0] {
+            return None;
+        }
+
+        Some(Self { inputs, targets })
+    }
+
+    pub fn len(&self) -> usize {
+        self.inputs.shape()[0]
+    }
+
+    pub fn batch(&self, start: usize, end: usize) -> Option<(Tensor, Tensor)> {
+        let inputs = self.inputs.slice_rows(start, end)?;
+        let targets = self.targets.slice_rows(start, end)?;
+
+        Some((inputs, targets))
+    }
+}
+
+pub struct DataLoader<'a> {
+    dataset: &'a TensorDataset,
+    batch_size: usize,
+    position: usize,
+}
+
+impl<'a> DataLoader<'a> {
+    pub fn new(dataset: &'a TensorDataset, batch_size: usize) -> Self {
+        assert!(batch_size > 0);
+
+        Self {
+            dataset,
+            batch_size,
+            position: 0usize,
+        }
+    }
+}
+
+impl Iterator for DataLoader<'_> {
+    type Item = (Tensor, Tensor);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.position >= self.dataset.len() {
+            return None;
+        }
+
+        let start = self.position;
+        let end = (self.position + self.batch_size).min(self.dataset.len());
+
+        let batch = self.dataset.batch(start, end);
+
+        self.position = end;
+
+        batch
+    }
 }
 
 #[cfg(test)]
@@ -1150,5 +1231,42 @@ mod tests {
 
             assert_eq!(x.grad(), Some(vec![-1., -1., -1.]));
         }
+    }
+
+    #[test]
+    fn slice_rows() {
+        let tensor = Tensor::new(vec![1., 2., 3., 4., 5., 6., 7., 8.], vec![4, 2]).unwrap();
+
+        let sliced = tensor.slice_rows(1, 3).unwrap();
+
+        assert_eq!(
+            sliced,
+            Tensor::new(vec![3., 4., 5., 6.,], vec![2, 2],).unwrap()
+        );
+    }
+
+    #[test]
+    fn dataloader() {
+        let inputs =
+            Tensor::new(vec![1., 2., 3., 4., 5., 6., 7., 8., 9., 10.], vec![5, 2]).unwrap();
+
+        let targets = Tensor::new(vec![1., 2., 3., 4., 5.], vec![5, 1]).unwrap();
+
+        let dataset = TensorDataset::new(inputs, targets).unwrap();
+        let mut loader = DataLoader::new(&dataset, 2);
+
+        let (x1, y1) = loader.next().unwrap();
+        assert_eq!(x1.shape(), vec![2, 2]);
+        assert_eq!(y1.shape(), vec![2, 1]);
+
+        let (x2, y2) = loader.next().unwrap();
+        assert_eq!(x2.shape(), vec![2, 2]);
+        assert_eq!(y2.shape(), vec![2, 1]);
+
+        let (x3, y3) = loader.next().unwrap();
+        assert_eq!(x3.shape(), vec![1, 2]);
+        assert_eq!(y3.shape(), vec![1, 1]);
+
+        assert!(loader.next().is_none());
     }
 }

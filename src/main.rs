@@ -7,39 +7,34 @@ fn main() {
     let model = Linear::new(1, 1);
     let loss_fn = MSELoss;
 
-    let batches = vec![
-        (
-            Tensor::new(vec![-1., 0.], vec![2, 1]).unwrap(),
-            Tensor::new(vec![-1., 1.], vec![2, 1]).unwrap(),
-        ),
-        (
-            Tensor::new(vec![1., 2.], vec![2, 1]).unwrap(),
-            Tensor::new(vec![3., 5.], vec![2, 1]).unwrap(),
-        ),
-    ];
+    let inputs = Tensor::new(vec![-1., 0., 1., 2.], vec![4, 1]).unwrap();
+    let targets = Tensor::new(vec![-1., 1., 3., 5.], vec![4, 1]).unwrap();
+
+    let dataset = TensorDataset::new(inputs, targets).unwrap();
 
     let mut optimizer = SGD::new(model.parameters(), 0.05);
 
     for epoch in 0..100 {
-        let mut epoch_loss = 0.;
+        let loader = DataLoader::new(&dataset, 2);
 
-        for (input, target) in &batches {
+        let mut epoch_loss = 0.;
+        let mut batch_count = 0;
+
+        for (input, target) in loader {
             optimizer.zero_grad();
 
-            let prediction = model.forward(input);
-            let loss = loss_fn.forward(&prediction, target);
+            let prediction = model.forward(&input);
+            let loss = loss_fn.forward(&prediction, &target);
 
             epoch_loss += loss.data()[0];
+            batch_count += 1;
 
             loss.backward();
             optimizer.step();
         }
 
         if epoch % 10 == 0 {
-            println!(
-                "epoch: {epoch}, loss: {}",
-                epoch_loss / batches.len() as f32
-            )
+            println!("epoch: {epoch}, loss: {}", epoch_loss / batch_count as f32)
         };
     }
 
