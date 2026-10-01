@@ -12,7 +12,7 @@ fn main() {
 
     let dataset = TensorDataset::new(inputs, targets).unwrap();
 
-    let mut optimizer = SGD::new(model.parameters(), 0.05);
+    let mut optimizer = SGD::new(model.parameters(), 0.001);
 
     for epoch in 0..100 {
         let loader = DataLoader::new(&dataset, 2, true);

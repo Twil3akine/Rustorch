@@ -737,15 +737,13 @@ impl Tensor {
         self.inner.borrow_mut().grad = None;
     }
 
-    pub(crate) fn apply_grad(&self, lr: f32) {
+    pub(crate) fn apply_update(&self, update: &[f32]) {
         let mut inner = self.inner.borrow_mut();
 
-        let Some(grad) = inner.grad.clone() else {
-            return;
-        };
+        assert_eq!(inner.data.len(), update.len());
 
-        for (data, grad) in inner.data.iter_mut().zip(grad) {
-            *data -= lr * grad;
+        for (data, delta) in inner.data.iter_mut().zip(update) {
+            *data -= delta;
         }
     }
 
