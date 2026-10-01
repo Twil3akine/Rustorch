@@ -785,6 +785,35 @@ impl Tensor {
 
         Tensor::new(output, vec![indices.len(), d])
     }
+
+    pub fn argmax(&self) -> Vec<usize> {
+        assert_eq!(self.ndim(), 2);
+
+        let inner = self.inner.borrow();
+
+        let n = inner.shape[0];
+        let c = inner.shape[1];
+
+        let mut result = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let row = &inner.data[i * c..(i + 1) * c];
+
+            let mut max_index = 0;
+            let mut max_value = row[0];
+
+            for j in 1..c {
+                if row[j] > max_value {
+                    max_value = row[j];
+                    max_index = j;
+                }
+            }
+
+            result.push(max_index);
+        }
+
+        result
+    }
 }
 
 #[cfg(test)]
