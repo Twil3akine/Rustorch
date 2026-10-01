@@ -3,39 +3,8 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::autograd::grad_enabled;
-
-#[derive(Clone)]
-pub struct Tensor {
-    inner: Rc<RefCell<TensorInner>>,
-}
-
-impl std::fmt::Debug for Tensor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.inner.borrow();
-
-        f.debug_struct("Tensor")
-            .field("data", &inner.data)
-            .field("shape", &inner.shape)
-            .finish()
-    }
-}
-
-impl PartialEq for Tensor {
-    fn eq(&self, other: &Self) -> bool {
-        let self_inner = self.inner.borrow();
-        let other_inner = other.inner.borrow();
-
-        self_inner.data == other_inner.data && self_inner.shape == other_inner.shape
-    }
-}
-
-struct TensorInner {
-    data: Vec<f32>,
-    shape: Vec<usize>,
-    grad: Option<Vec<f32>>,
-    operation: Option<Operation>,
-    parents: Vec<Tensor>,
-}
+use crate::backend::Device;
+use crate::backend::{Backend, cpu::Cpu, storage::Storage};
 
 #[derive(Clone, Debug)]
 enum Operation {
@@ -54,6 +23,40 @@ enum Operation {
     Gather(Vec<usize>),
 }
 
+#[derive(Clone)]
+pub struct Tensor {
+    inner: Rc<RefCell<TensorInner>>,
+}
+
+impl std::fmt::Debug for Tensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.borrow();
+
+        f.debug_struct("Tensor")
+            .field("data", &inner.storage.data())
+            .field("shape", &inner.shape)
+            .finish()
+    }
+}
+
+impl PartialEq for Tensor {
+    fn eq(&self, other: &Self) -> bool {
+        let self_inner = self.inner.borrow();
+        let other_inner = other.inner.borrow();
+
+        self_inner.storage.data() == other_inner.storage.data()
+            && self_inner.shape == other_inner.shape
+    }
+}
+
+struct TensorInner {
+    storage: Storage,
+    shape: Vec<usize>,
+    grad: Option<Vec<f32>>,
+    operation: Option<Operation>,
+    parents: Vec<Tensor>,
+}
+
 impl Tensor {
     pub fn new(data: Vec<f32>, shape: Vec<usize>) -> Option<Self> {
         if data.len() != shape.iter().product() {
@@ -61,7 +64,7 @@ impl Tensor {
         }
 
         let inner = TensorInner {
-            data,
+            storage: Storage::Cpu(data),
             shape,
             grad: None,
             operation: None,
@@ -74,11 +77,15 @@ impl Tensor {
     }
 
     pub fn data(&self) -> Vec<f32> {
-        self.inner.borrow().data.clone()
+        self.inner.borrow().storage.data().to_vec()
     }
 
     pub fn shape(&self) -> Vec<usize> {
         self.inner.borrow().shape.clone()
+    }
+
+    pub fn device(&self) -> Device {
+        self.inner.borrow().storage.device()
     }
 
     pub fn ndim(&self) -> usize {
@@ -105,7 +112,7 @@ impl Tensor {
             offset = offset * inner.shape[i] + index[i];
         }
 
-        Some(inner.data[offset])
+        Some(inner.storage.data()[offset])
     }
 
     pub fn reshape(&self, shape: Vec<usize>) -> Option<Self> {
@@ -115,7 +122,7 @@ impl Tensor {
             return None;
         }
 
-        let data = self.inner.borrow().data.clone();
+        let data = self.inner.borrow().storage.data().to_vec();
 
         Some(Self::from_operation(
             data,
@@ -137,9 +144,14 @@ impl Tensor {
             (None, Vec::new())
         };
 
+        let device = parents
+            .first()
+            .map(|parent| parent.device())
+            .unwrap_or(Device::Cpu);
+
         Self {
             inner: Rc::new(RefCell::new(TensorInner {
-                data,
+                storage: Storage::new(data, device),
                 shape,
                 grad: None,
                 operation,
@@ -152,6 +164,10 @@ impl Tensor {
     where
         F: Fn(f32, f32) -> f32,
     {
+        if self.device() != other.device() {
+            return None;
+        }
+
         let self_shape = self.inner.borrow().shape.clone();
         let other_shape = other.inner.borrow().shape.clone();
 
@@ -170,8 +186,8 @@ impl Tensor {
                 let other_offset = Self::broadcast_offset(&output_index, &other_shape);
 
                 data.push(op(
-                    self_inner.data[self_offset],
-                    other_inner.data[other_offset],
+                    self_inner.storage.data()[self_offset],
+                    other_inner.storage.data()[other_offset],
                 ));
             }
 
@@ -190,7 +206,12 @@ impl Tensor {
         let (data, shape) = {
             let inner = self.inner.borrow();
 
-            let data = inner.data.iter().map(|x| -x).collect::<Vec<f32>>();
+            let data = inner
+                .storage
+                .data()
+                .iter()
+                .map(|x| -x)
+                .collect::<Vec<f32>>();
 
             let shape = inner.shape.clone();
 
@@ -215,34 +236,31 @@ impl Tensor {
     pub fn matmul(&self, other: &Self) -> Option<Tensor> {
         if !(self.ndim() == 2
             && other.ndim() == 2
+            && self.device() == other.device()
             && self.inner.borrow().shape[1] == other.inner.borrow().shape[0])
         {
             return None;
         }
 
-        let (result, n, m) = {
-            let self_inner = self.inner.borrow();
-            let other_inner = other.inner.borrow();
+        let (lhs_data, rhs_data, n, k, m) = {
+            let lhs = self.inner.borrow();
+            let rhs = other.inner.borrow();
 
-            let n = self_inner.shape[0];
-            let k = self_inner.shape[1];
-            let m = other_inner.shape[1];
+            let n = lhs.shape[0];
+            let k = lhs.shape[1];
+            let m = rhs.shape[1];
 
-            let mut result = Vec::with_capacity(n * m);
+            (
+                lhs.storage.data().to_vec(),
+                rhs.storage.data().to_vec(),
+                n,
+                k,
+                m,
+            )
+        };
 
-            for i in 0..n {
-                for j in 0..m {
-                    let mut sum: f32 = 0.;
-
-                    for t in 0..k {
-                        sum += self_inner.data[k * i + t] * other_inner.data[m * t + j];
-                    }
-
-                    result.push(sum);
-                }
-            }
-
-            (result, n, m)
+        let result = match self.device() {
+            Device::Cpu => Cpu::matmul(&lhs_data, &rhs_data, n, k, m),
         };
 
         Some(Self::from_operation(
@@ -256,7 +274,7 @@ impl Tensor {
     pub fn sum(&self) -> Tensor {
         let data = {
             let inner = self.inner.borrow();
-            vec![inner.data.iter().sum()]
+            vec![inner.storage.data().iter().sum()]
         };
 
         Self::from_operation(data, vec![1], Operation::Sum, vec![self.clone()])
@@ -265,7 +283,7 @@ impl Tensor {
     pub fn mean(&self) -> Tensor {
         let data = {
             let inner = self.inner.borrow();
-            vec![inner.data.iter().sum::<f32>() / inner.data.len() as f32]
+            vec![inner.storage.data().iter().sum::<f32>() / inner.storage.data().len() as f32]
         };
 
         Self::from_operation(data, vec![1], Operation::Mean, vec![self.clone()])
@@ -275,7 +293,12 @@ impl Tensor {
         let (data, shape) = {
             let inner = self.inner.borrow();
 
-            let data = inner.data.iter().map(|x| x.max(0.)).collect::<Vec<f32>>();
+            let data = inner
+                .storage
+                .data()
+                .iter()
+                .map(|x| x.max(0.))
+                .collect::<Vec<f32>>();
 
             let shape = inner.shape.clone();
 
@@ -293,10 +316,10 @@ impl Tensor {
         let n = inner.shape[0];
         let c = inner.shape[1];
 
-        let mut data = Vec::with_capacity(inner.data.len());
+        let mut data = Vec::with_capacity(inner.storage.data().len());
 
         for i in 0..n {
-            let row = &inner.data[i * c..(i + 1) * c];
+            let row = &inner.storage.data()[i * c..(i + 1) * c];
 
             let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
@@ -320,7 +343,8 @@ impl Tensor {
             let inner = self.inner.borrow();
 
             let data = inner
-                .data
+                .storage
+                .data()
                 .iter()
                 .map(|x| f32::exp(*x))
                 .collect::<Vec<f32>>();
@@ -337,7 +361,12 @@ impl Tensor {
         let (data, shape) = {
             let inner = self.inner.borrow();
 
-            let data = inner.data.iter().map(|x| f32::ln(*x)).collect::<Vec<f32>>();
+            let data = inner
+                .storage
+                .data()
+                .iter()
+                .map(|x| f32::ln(*x))
+                .collect::<Vec<f32>>();
 
             let shape = inner.shape.clone();
 
@@ -364,7 +393,7 @@ impl Tensor {
 
             assert!(j < c);
 
-            data.push(inner.data[i * c + j]);
+            data.push(inner.storage.data()[i * c + j]);
         }
 
         drop(inner);
@@ -433,7 +462,7 @@ impl Tensor {
     fn accumulate_grad(&self, grad: &[f32]) {
         let mut inner = self.inner.borrow_mut();
 
-        assert_eq!(inner.data.len(), grad.len());
+        assert_eq!(inner.storage.data().len(), grad.len());
 
         match &mut inner.grad {
             Some(current_grad) => {
@@ -559,8 +588,8 @@ impl Tensor {
                     let rhs_shape = rhs.shape();
                     let output_shape = tensor.shape();
 
-                    let lhs_data = lhs.inner.borrow().data.clone();
-                    let rhs_data = rhs.inner.borrow().data.clone();
+                    let lhs_data = lhs.inner.borrow().storage.data().to_vec();
+                    let rhs_data = rhs.inner.borrow().storage.data().to_vec();
 
                     let mut lhs_grad = vec![0.; lhs.numel()];
                     let mut rhs_grad = vec![0.; rhs.numel()];
@@ -590,8 +619,8 @@ impl Tensor {
                     let k = lhs_shape[1];
                     let m = rhs_shape[1];
 
-                    let lhs_data = lhs.inner.borrow().data.clone();
-                    let rhs_data = rhs.inner.borrow().data.clone();
+                    let lhs_data = lhs.inner.borrow().storage.data().to_vec();
+                    let rhs_data = rhs.inner.borrow().storage.data().to_vec();
 
                     let mut lhs_grad = vec![0.0; lhs.numel()];
                     let mut rhs_grad = vec![0.0; rhs.numel()];
@@ -645,7 +674,7 @@ impl Tensor {
                 Some(Operation::ReLU) => {
                     let parent = &parents[0];
 
-                    let parent_data = parent.inner.borrow().data.clone();
+                    let parent_data = parent.inner.borrow().storage.data().to_vec();
 
                     let parent_grad = grad
                         .iter()
@@ -663,7 +692,7 @@ impl Tensor {
                     let n = shape[0];
                     let c = shape[1];
 
-                    let output_data = tensor.inner.borrow().data.clone();
+                    let output_data = tensor.inner.borrow().storage.data().to_vec();
 
                     let mut parent_grad = vec![0.; parent.numel()];
 
@@ -688,7 +717,7 @@ impl Tensor {
                 Some(Operation::Exp) => {
                     let parent = &parents[0];
 
-                    let output_data = tensor.inner.borrow().data.clone();
+                    let output_data = tensor.inner.borrow().storage.data().to_vec();
 
                     let parent_grad = grad
                         .iter()
@@ -702,7 +731,7 @@ impl Tensor {
                 Some(Operation::Log) => {
                     let parent = &parents[0];
 
-                    let parent_data = parent.inner.borrow().data.clone();
+                    let parent_data = parent.inner.borrow().storage.data().to_vec();
 
                     let parent_grad = grad
                         .iter()
@@ -747,9 +776,9 @@ impl Tensor {
     pub(crate) fn apply_update(&self, update: &[f32]) {
         let mut inner = self.inner.borrow_mut();
 
-        assert_eq!(inner.data.len(), update.len());
+        assert_eq!(inner.storage.data().len(), update.len());
 
-        for (data, delta) in inner.data.iter_mut().zip(update) {
+        for (data, delta) in inner.storage.data_mut().iter_mut().zip(update) {
             *data -= delta;
         }
     }
@@ -763,7 +792,7 @@ impl Tensor {
 
         let d = inner.shape[1];
 
-        let output = inner.data[start * d..end * d].to_vec();
+        let output = inner.storage.data()[start * d..end * d].to_vec();
 
         Tensor::new(output, vec![end - start, d])
     }
@@ -788,7 +817,7 @@ impl Tensor {
             let start = i * d;
             let end = start + d;
 
-            output.extend_from_slice(&inner.data[start..end]);
+            output.extend_from_slice(&inner.storage.data()[start..end]);
         }
 
         Tensor::new(output, vec![indices.len(), d])
@@ -805,7 +834,7 @@ impl Tensor {
         let mut result = Vec::with_capacity(n);
 
         for i in 0..n {
-            let row = &inner.data[i * c..(i + 1) * c];
+            let row = &inner.storage.data()[i * c..(i + 1) * c];
 
             let mut max_index = 0;
             let mut max_value = row[0];
@@ -826,9 +855,9 @@ impl Tensor {
     pub(crate) fn set_data(&self, data: &[f32]) {
         let mut inner = self.inner.borrow_mut();
 
-        assert_eq!(inner.data.len(), data.len());
+        assert_eq!(inner.storage.data().len(), data.len());
 
-        inner.data.copy_from_slice(data);
+        inner.storage.data_mut().copy_from_slice(data);
     }
 }
 
