@@ -1,3 +1,4 @@
+use rand::seq::SliceRandom;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -761,6 +762,32 @@ impl Tensor {
 
         Tensor::new(output, vec![end - start, d])
     }
+
+    pub fn take_rows(&self, indices: &[usize]) -> Option<Tensor> {
+        let inner = self.inner.borrow();
+
+        if inner.shape.len() != 2 {
+            return None;
+        }
+
+        let n = inner.shape[0];
+        let d = inner.shape[1];
+
+        let mut output = Vec::with_capacity(indices.len() * d);
+
+        for &i in indices {
+            if i >= n {
+                return None;
+            }
+
+            let start = i * d;
+            let end = start + d;
+
+            output.extend_from_slice(&inner.data[start..end]);
+        }
+
+        Tensor::new(output, vec![indices.len(), d])
+    }
 }
 
 pub struct TensorDataset {
@@ -791,21 +818,37 @@ impl TensorDataset {
 
         Some((inputs, targets))
     }
+
+    pub fn batch_indices(&self, indices: &[usize]) -> Option<(Tensor, Tensor)> {
+        let inputs = self.inputs.take_rows(indices)?;
+        let targets = self.targets.take_rows(indices)?;
+
+        Some((inputs, targets))
+    }
 }
 
 pub struct DataLoader<'a> {
     dataset: &'a TensorDataset,
     batch_size: usize,
+    indices: Vec<usize>,
     position: usize,
 }
 
 impl<'a> DataLoader<'a> {
-    pub fn new(dataset: &'a TensorDataset, batch_size: usize) -> Self {
+    pub fn new(dataset: &'a TensorDataset, batch_size: usize, shuffle: bool) -> Self {
         assert!(batch_size > 0);
+
+        let mut indices = (0..dataset.len()).collect::<Vec<usize>>();
+
+        if shuffle {
+            let mut rng = rand::rng();
+            indices.shuffle(&mut rng);
+        }
 
         Self {
             dataset,
             batch_size,
+            indices: (0..dataset.len()).collect::<Vec<usize>>(),
             position: 0usize,
         }
     }
@@ -822,7 +865,8 @@ impl Iterator for DataLoader<'_> {
         let start = self.position;
         let end = (self.position + self.batch_size).min(self.dataset.len());
 
-        let batch = self.dataset.batch(start, end);
+        let batch_indices = &self.indices[start..end];
+        let batch = self.dataset.batch_indices(batch_indices);
 
         self.position = end;
 
@@ -1253,7 +1297,7 @@ mod tests {
         let targets = Tensor::new(vec![1., 2., 3., 4., 5.], vec![5, 1]).unwrap();
 
         let dataset = TensorDataset::new(inputs, targets).unwrap();
-        let mut loader = DataLoader::new(&dataset, 2);
+        let mut loader = DataLoader::new(&dataset, 2, false);
 
         let (x1, y1) = loader.next().unwrap();
         assert_eq!(x1.shape(), vec![2, 2]);
@@ -1268,5 +1312,27 @@ mod tests {
         assert_eq!(y3.shape(), vec![1, 1]);
 
         assert!(loader.next().is_none());
+    }
+
+    #[test]
+    fn dataloader_with_shuffle() {
+        let inputs = Tensor::new(vec![1., 2., 3., 4.], vec![4, 1]).unwrap();
+
+        let targets = Tensor::new(vec![10., 20., 30., 40.], vec![4, 1]).unwrap();
+
+        let dataset = TensorDataset::new(inputs, targets).unwrap();
+        let loader = DataLoader::new(&dataset, 2, true);
+
+        let mut pairs = Vec::new();
+
+        for (inputs, targets) in loader {
+            for (input, target) in inputs.data().into_iter().zip(targets.data()) {
+                pairs.push((input as i32, target as i32));
+            }
+        }
+
+        pairs.sort();
+
+        assert_eq!(pairs, vec![(1, 10), (2, 20), (3, 30), (4, 40),]);
     }
 }

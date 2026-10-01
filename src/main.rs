@@ -15,7 +15,7 @@ fn main() {
     let mut optimizer = SGD::new(model.parameters(), 0.05);
 
     for epoch in 0..100 {
-        let loader = DataLoader::new(&dataset, 2);
+        let loader = DataLoader::new(&dataset, 2, true);
 
         let mut epoch_loss = 0.;
         let mut batch_count = 0;
