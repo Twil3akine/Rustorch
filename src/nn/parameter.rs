@@ -16,4 +16,8 @@ impl Parameter {
     pub fn zero_grad(&self) {
         self.tensor.zero_grad();
     }
+
+    pub(crate) fn set_data(&self, data: &[f32]) {
+        self.tensor().set_data(data);
+    }
 }

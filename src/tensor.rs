@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use crate::autograd::grad_enabled;
+
 #[derive(Clone)]
 pub struct Tensor {
     inner: Rc<RefCell<TensorInner>>,
@@ -129,12 +131,18 @@ impl Tensor {
         operation: Operation,
         parents: Vec<Tensor>,
     ) -> Self {
+        let (operation, parents) = if grad_enabled() {
+            (Some(operation), parents)
+        } else {
+            (None, Vec::new())
+        };
+
         Self {
             inner: Rc::new(RefCell::new(TensorInner {
                 data,
                 shape,
                 grad: None,
-                operation: Some(operation),
+                operation,
                 parents,
             })),
         }
@@ -814,6 +822,14 @@ impl Tensor {
 
         result
     }
+
+    pub(crate) fn set_data(&self, data: &[f32]) {
+        let mut inner = self.inner.borrow_mut();
+
+        assert_eq!(inner.data.len(), data.len());
+
+        inner.data.copy_from_slice(data);
+    }
 }
 
 #[cfg(test)]
@@ -1229,5 +1245,16 @@ mod tests {
             sliced,
             Tensor::new(vec![3., 4., 5., 6.,], vec![2, 2],).unwrap()
         );
+    }
+
+    #[test]
+    fn no_grad() {
+        let x = Tensor::new(vec![2.], vec![1]).unwrap();
+
+        let y = crate::autograd::no_grad(|| x.mul(&x).unwrap().sum());
+
+        y.backward();
+
+        assert_eq!(x.grad(), None);
     }
 }
