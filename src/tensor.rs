@@ -139,16 +139,16 @@ impl Tensor {
         operation: Operation,
         parents: Vec<Tensor>,
     ) -> Self {
+        let device = parents
+            .first()
+            .map(|parent| parent.device())
+            .unwrap_or(Device::Cpu);
+
         let (operation, parents) = if grad_enabled() {
             (Some(operation), parents)
         } else {
             (None, Vec::new())
         };
-
-        let device = parents
-            .first()
-            .map(|parent| parent.device())
-            .unwrap_or(Device::Cpu);
 
         Self {
             inner: Rc::new(RefCell::new(TensorInner {
@@ -264,19 +264,25 @@ impl Tensor {
     pub fn sum(&self) -> Tensor {
         let data = {
             let inner = self.inner.borrow();
-            vec![inner.storage.data().iter().sum()]
+
+            match inner.storage.device() {
+                Device::Cpu => Cpu::sum(inner.storage.data()),
+            }
         };
 
-        Self::from_operation(data, vec![1], Operation::Sum, vec![self.clone()])
+        Self::from_operation(vec![data], vec![1], Operation::Sum, vec![self.clone()])
     }
 
     pub fn mean(&self) -> Tensor {
         let data = {
             let inner = self.inner.borrow();
-            vec![inner.storage.data().iter().sum::<f32>() / inner.storage.data().len() as f32]
+
+            match inner.storage.device() {
+                Device::Cpu => Cpu::mean(inner.storage.data()),
+            }
         };
 
-        Self::from_operation(data, vec![1], Operation::Mean, vec![self.clone()])
+        Self::from_operation(vec![data], vec![1], Operation::Mean, vec![self.clone()])
     }
 
     pub fn relu(&self) -> Tensor {
@@ -298,29 +304,18 @@ impl Tensor {
     pub fn log_softmax(&self) -> Tensor {
         assert_eq!(self.ndim(), 2);
 
-        let inner = self.inner.borrow();
+        let (data, shape) = {
+            let inner = self.inner.borrow();
 
-        let n = inner.shape[0];
-        let c = inner.shape[1];
+            let n = inner.shape[0];
+            let c = inner.shape[1];
 
-        let mut data = Vec::with_capacity(inner.storage.data().len());
+            let data = match inner.storage.device() {
+                Device::Cpu => Cpu::log_softmax(inner.storage.data(), n, c),
+            };
 
-        for i in 0..n {
-            let row = &inner.storage.data()[i * c..(i + 1) * c];
-
-            let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-
-            let exp_sum = row.iter().map(|x| (*x - max).exp()).sum::<f32>();
-
-            let log_sum_exp = exp_sum.ln();
-
-            for x in row {
-                data.push((*x - max) - log_sum_exp);
-            }
-        }
-
-        let shape = inner.shape.clone();
-        drop(inner);
+            (data, inner.shape.clone())
+        };
 
         Self::from_operation(data, shape, Operation::LogSoftmax, vec![self.clone()])
     }
@@ -360,24 +355,20 @@ impl Tensor {
     pub fn gather(&self, indices: &[usize]) -> Tensor {
         assert_eq!(self.ndim(), 2);
 
-        let inner = self.inner.borrow();
+        let (data, n) = {
+            let inner = self.inner.borrow();
 
-        let n = inner.shape[0];
-        let c = inner.shape[1];
+            let n = inner.shape[0];
+            let c = inner.shape[1];
 
-        assert_eq!(indices.len(), n);
+            assert_eq!(indices.len(), n);
 
-        let mut data = Vec::with_capacity(n);
+            let data = match inner.storage.device() {
+                Device::Cpu => Cpu::gather(inner.storage.data(), indices, n, c),
+            };
 
-        for i in 0..n {
-            let j = indices[i];
-
-            assert!(j < c);
-
-            data.push(inner.storage.data()[i * c + j]);
-        }
-
-        drop(inner);
+            (data, n)
+        };
 
         Self::from_operation(
             data,

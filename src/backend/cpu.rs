@@ -91,4 +91,46 @@ impl Backend for Cpu {
     fn neg(input: &[f32]) -> Vec<f32> {
         input.iter().map(|x| -x).collect::<Vec<f32>>()
     }
+
+    fn sum(input: &[f32]) -> f32 {
+        input.iter().sum()
+    }
+
+    fn mean(input: &[f32]) -> f32 {
+        Self::sum(input) / input.len() as f32
+    }
+
+    fn log_softmax(input: &[f32], n: usize, c: usize) -> Vec<f32> {
+        let mut data = Vec::with_capacity(input.len());
+
+        for i in 0..n {
+            let row = &input[i * c..(i + 1) * c];
+
+            let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+            let exp_sum = row.iter().map(|x| (*x - max).exp()).sum::<f32>();
+
+            let log_sum_exp = exp_sum.ln();
+
+            for x in row {
+                data.push((*x - max) - log_sum_exp);
+            }
+        }
+
+        data
+    }
+
+    fn gather(input: &[f32], indices: &[usize], n: usize, c: usize) -> Vec<f32> {
+        let mut data = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let j = indices[i];
+
+            assert!(j < c);
+
+            data.push(input[i * c + j]);
+        }
+
+        data
+    }
 }
