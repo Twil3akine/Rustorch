@@ -224,38 +224,41 @@ impl Tensor {
     }
 
     pub fn matmul(&self, other: &Self) -> Option<Tensor> {
-        if !(self.ndim() == 2
-            && other.ndim() == 2
-            && self.device() == other.device()
-            && self.inner.borrow().shape[1] == other.inner.borrow().shape[0])
-        {
+        if self.ndim() < 2 || other.ndim() < 2 || self.device() != other.device() {
             return None;
         }
 
-        let (lhs_data, rhs_data, n, k, m) = {
-            let lhs = self.inner.borrow();
-            let rhs = other.inner.borrow();
+        let lhs_shape = self.shape();
+        let rhs_shape = other.shape();
 
-            let n = lhs.shape[0];
-            let k = lhs.shape[1];
-            let m = rhs.shape[1];
+        let n = lhs_shape[lhs_shape.len() - 2];
+        let k = lhs_shape[lhs_shape.len() - 1];
 
-            (
-                lhs.storage.data().to_vec(),
-                rhs.storage.data().to_vec(),
-                n,
-                k,
-                m,
-            )
-        };
+        let rhs_k = rhs_shape[rhs_shape.len() - 2];
+        let m = rhs_shape[rhs_shape.len() - 1];
 
-        let result = match self.device() {
-            Device::Cpu => Cpu::matmul(&lhs_data, &rhs_data, n, k, m),
+        if k != rhs_k {
+            return None;
+        }
+
+        let lhs_batch = &lhs_shape[..lhs_shape.len() - 2];
+        let rhs_batch = &rhs_shape[..rhs_shape.len() - 2];
+
+        let mut output_shape = Self::broadcast_shape(lhs_batch, rhs_batch)?;
+
+        output_shape.push(n);
+        output_shape.push(m);
+
+        let lhs = self.data();
+        let rhs = other.data();
+
+        let data = match self.device() {
+            Device::Cpu => Cpu::matmul(&lhs, &rhs, &lhs_shape, &rhs_shape, &output_shape),
         };
 
         Some(Self::from_operation(
-            result,
-            vec![n, m],
+            data,
+            output_shape,
             Operation::MatMul,
             vec![self.clone(), other.clone()],
         ))
@@ -556,40 +559,64 @@ impl Tensor {
 
                     let lhs_shape = lhs.shape();
                     let rhs_shape = rhs.shape();
+                    let output_shape = tensor.shape();
 
-                    let n = lhs_shape[0];
-                    let k = lhs_shape[1];
-                    let m = rhs_shape[1];
+                    let n = lhs_shape[lhs_shape.len() - 2];
+                    let k = lhs_shape[lhs_shape.len() - 1];
+                    let m = rhs_shape[rhs_shape.len() - 1];
+
+                    let lhs_batch_shape = &lhs_shape[..lhs_shape.len() - 2];
+
+                    let rhs_batch_shape = &rhs_shape[..rhs_shape.len() - 2];
+
+                    let output_batch_shape = &output_shape[..output_shape.len() - 2];
+
+                    let batch_count: usize = output_batch_shape.iter().product();
 
                     let lhs_data = lhs.inner.borrow().storage.data().to_vec();
+
                     let rhs_data = rhs.inner.borrow().storage.data().to_vec();
 
-                    let mut lhs_grad = vec![0.0; lhs.numel()];
-                    let mut rhs_grad = vec![0.0; rhs.numel()];
+                    let mut lhs_grad = vec![0.; lhs.numel()];
+                    let mut rhs_grad = vec![0.; rhs.numel()];
 
-                    // dL/dA = G @ B^T
-                    for i in 0..n {
-                        for t in 0..k {
-                            let mut sum = 0.0;
+                    for batch in 0..batch_count {
+                        let batch_index = unravel_index(batch, output_batch_shape);
 
-                            for j in 0..m {
-                                sum += grad[i * m + j] * rhs_data[t * m + j];
+                        let lhs_batch = broadcast_offset(&batch_index, lhs_batch_shape);
+
+                        let rhs_batch = broadcast_offset(&batch_index, rhs_batch_shape);
+
+                        let lhs_base = lhs_batch * n * k;
+                        let rhs_base = rhs_batch * k * m;
+                        let grad_base = batch * n * m;
+
+                        // dL/dA = G @ B^T
+                        for i in 0..n {
+                            for t in 0..k {
+                                let mut sum = 0.;
+
+                                for j in 0..m {
+                                    sum += grad[grad_base + i * m + j]
+                                        * rhs_data[rhs_base + t * m + j];
+                                }
+
+                                lhs_grad[lhs_base + i * k + t] += sum;
                             }
-
-                            lhs_grad[i * k + t] = sum;
                         }
-                    }
 
-                    // dL/dB = A^T @ G
-                    for t in 0..k {
-                        for j in 0..m {
-                            let mut sum = 0.0;
+                        // dL/dB = A^T @ G
+                        for t in 0..k {
+                            for j in 0..m {
+                                let mut sum = 0.;
 
-                            for i in 0..n {
-                                sum += lhs_data[i * k + t] * grad[i * m + j];
+                                for i in 0..n {
+                                    sum += lhs_data[lhs_base + i * k + t]
+                                        * grad[grad_base + i * m + j];
+                                }
+
+                                rhs_grad[rhs_base + t * m + j] += sum;
                             }
-
-                            rhs_grad[t * m + j] = sum;
                         }
                     }
 
@@ -1204,6 +1231,19 @@ mod tests {
 
             assert_eq!(x.grad(), Some(vec![-1., -1., -1.]));
         }
+
+        {
+            let a = Tensor::new(vec![1., 2., 3., 4., 5., 6., 7., 8.], vec![2, 2, 2]).unwrap();
+
+            let b = Tensor::new(vec![1., 0., 0., 1.], vec![1, 2, 2]).unwrap();
+
+            let y = a.matmul(&b).unwrap().sum();
+            y.backward();
+
+            assert_eq!(a.grad(), Some(vec![1., 1., 1., 1., 1., 1., 1., 1.,]));
+
+            assert_eq!(b.grad(), Some(vec![16., 16., 20., 20.,]));
+        }
     }
 
     #[test]
@@ -1227,5 +1267,26 @@ mod tests {
         y.backward();
 
         assert_eq!(x.grad(), None);
+    }
+
+    #[test]
+    fn batched() {
+        let a = Tensor::new(
+            vec![1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12.],
+            vec![2, 2, 3],
+        )
+        .unwrap();
+
+        let b = Tensor::new(
+            vec![1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12.],
+            vec![2, 3, 2],
+        )
+        .unwrap();
+
+        let c = a.matmul(&b).unwrap();
+
+        assert_eq!(c.shape(), vec![2, 2, 2]);
+
+        assert_eq!(c.data(), vec![22., 28., 49., 64., 220., 244., 301., 334.,]);
     }
 }

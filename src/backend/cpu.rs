@@ -58,18 +58,47 @@ impl Backend for Cpu {
     ) -> Vec<f32> {
         Self::binary_op(lhs, rhs, lhs_shape, rhs_shape, output_shape, |x, y| x * y)
     }
-    fn matmul(lhs: &[f32], rhs: &[f32], n: usize, k: usize, m: usize) -> Vec<f32> {
-        let mut result = Vec::with_capacity(n * m);
+    fn matmul(
+        lhs: &[f32],
+        rhs: &[f32],
+        lhs_shape: &[usize],
+        rhs_shape: &[usize],
+        output_shape: &[usize],
+    ) -> Vec<f32> {
+        let n = lhs_shape[lhs_shape.len() - 2];
+        let k = lhs_shape[lhs_shape.len() - 1];
+        let m = rhs_shape[rhs_shape.len() - 1];
 
-        for i in 0..n {
-            for j in 0..m {
-                let mut sum = 0.;
+        let lhs_batch_shape = &lhs_shape[..lhs_shape.len() - 2];
 
-                for t in 0..k {
-                    sum += lhs[i * k + t] * rhs[t * m + j];
+        let rhs_batch_shape = &rhs_shape[..rhs_shape.len() - 2];
+
+        let output_batch_shape = &output_shape[..output_shape.len() - 2];
+
+        let batch_count: usize = output_batch_shape.iter().product();
+
+        let mut result = Vec::with_capacity(batch_count * n * m);
+
+        for batch in 0..batch_count {
+            let batch_index = unravel_index(batch, output_batch_shape);
+
+            let lhs_batch = broadcast_offset(&batch_index, lhs_batch_shape);
+
+            let rhs_batch = broadcast_offset(&batch_index, rhs_batch_shape);
+
+            let lhs_base = lhs_batch * n * k;
+            let rhs_base = rhs_batch * k * m;
+
+            for i in 0..n {
+                for j in 0..m {
+                    let mut sum = 0.;
+
+                    for t in 0..k {
+                        sum += lhs[lhs_base + i * k + t] * rhs[rhs_base + t * m + j];
+                    }
+
+                    result.push(sum);
                 }
-
-                result.push(sum);
             }
         }
 
