@@ -1,6 +1,6 @@
 use crate::nn::*;
 use crate::optim::*;
-use crate::tensor::*;
+
 
 pub struct Adam<'a> {
     parameters: Vec<&'a Parameter>,
@@ -80,6 +80,7 @@ impl<'a> Optimizer for Adam<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tensor::Tensor;
 
     #[test]
     fn adam_step() {

@@ -1,6 +1,6 @@
 use crate::nn::*;
 use crate::optim::*;
-use crate::tensor::*;
+
 
 pub struct SGD<'a> {
     parameters: Vec<&'a Parameter>,
@@ -36,6 +36,7 @@ impl Optimizer for SGD<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tensor::Tensor;
 
     #[test]
     fn sgd_step() {
